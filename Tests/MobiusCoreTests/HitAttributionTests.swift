@@ -293,4 +293,33 @@ final class HitAttributionTests: XCTestCase {
         XCTAssertEqual(HitAttribution.verdict(usage: snapshot(fiveHour: 97, sevenDay: 12), now: now),
                        .inconclusive)
     }
+
+    // MARK: 최후 폴백이 무엇으로 기록할지 (셀프리뷰 H1)
+
+    /// ★ 로그 라인에는 **모델 이름이 없다** — 그래서 로그 hit은 항상 `modelScoped == false`다.
+    /// 15분 뒤 최후 폴백이 그걸 그대로 기록하면 "그 모델만 막힘"이 **계정 전체 소진**이 되어
+    /// 메뉴바가 빨개지고 CLI 라벨이 틀리며, `autoSwitchMayLeave`가 `isLimited`에서 핀을 보기
+    /// **전에 단락**하므로 사용자가 고정해 둔 계정에서 강제로 밀려난다. 보류의 "종류"를
+    /// 기억해야 하는 이유이고, 그 판별이 이 함수다.
+    func testInconclusiveKindDecidesFallbackAttribution() {
+        // 계정 창 여유 + 모델 한도만 100%(리셋 시각 없음) → 모델 갈래
+        let modelOnly = snapshot(fiveHour: 9, sevenDay: 16,
+                                 scoped: [ScopedUsageLimit(label: "Fable", percent: 100,
+                                                           resetsAt: nil)])
+        XCTAssertEqual(HitAttribution.verdict(usage: modelOnly, now: now), .inconclusive)
+        XCTAssertTrue(HitAttribution.inconclusiveIsModelScoped(usage: modelOnly))
+
+        // 계정 창이 100%인데 리셋 시각을 못 얻은 경우 → 계정 갈래(모델 아님)
+        let accountStuck = UsageSnapshot(fiveHourPercent: 100, fiveHourResetsAt: nil,
+                                         sevenDayPercent: 10,
+                                         sevenDayResetsAt: now.addingTimeInterval(3600),
+                                         fetchedAt: now)
+        XCTAssertEqual(HitAttribution.verdict(usage: accountStuck, now: now), .inconclusive)
+        XCTAssertFalse(HitAttribution.inconclusiveIsModelScoped(usage: accountStuck))
+
+        // 한도 근접(5시간 99%)으로 보류된 경우도 계정 갈래다 — 곧 계정이 막힌다는 뜻이다.
+        let nearLimit = snapshot(fiveHour: 99, sevenDay: 30)
+        XCTAssertEqual(HitAttribution.verdict(usage: nearLimit, now: now), .inconclusive)
+        XCTAssertFalse(HitAttribution.inconclusiveIsModelScoped(usage: nearLimit))
+    }
 }

@@ -997,6 +997,15 @@ final class AppState: ObservableObject {
         /// 이 트리거를 만든 로그 hit(창 소진일 때만). 검증이 **끝내 불가능**할 때의
         /// 최후 폴백에 쓴다 — 아래 giveUp 처리 참조. P3처럼 창 신호가 아닌 경우 nil.
         let logHit: RateLimitHit?
+        /// 마지막 판정이 **모델 전용 한도** 때문에 보류됐는가(계정 창은 여유였다).
+        ///
+        /// ★ 로그 라인에는 **모델 이름이 없어서** `logHit.modelScoped`는 항상 false다
+        ///   (`RateLimitParser`가 true를 세우는 곳은 P3 경로뿐이고 그건 여기 안 온다).
+        ///   그래서 이 값 없이 최후 폴백을 쓰면 "그 모델만 막힘"이어야 할 상황이
+        ///   **계정 전체 소진**으로 기록된다 — 메뉴바가 빨개지고, CLI 라벨이 틀리고,
+        ///   무엇보다 `autoSwitchMayLeave`가 `isLimited`에서 **핀을 보기 전에 단락**해
+        ///   사용자가 고정해 둔 계정에서 15분 뒤 강제로 밀려난다(셀프리뷰 H1).
+        var lastInconclusiveWasModelScoped = false
     }
 
     /// **판정이 안 끝난 트리거**(계정 → 트리거).
@@ -1007,7 +1016,12 @@ final class AppState: ObservableObject {
     private var pendingHitVerify: [UUID: PendingTrigger] = [:]
     /// 보류 트리거의 수명 — 이 시간이 지나도록 판정을 못 했으면 버린다(오프라인이 길어질 때
     /// 옛 트리거로 뒤늦게 엉뚱한 기록을 남기지 않도록).
-    private static let pendingHitVerifyTTL: TimeInterval = 15 * 60
+    /// ★ `HitAttribution.modelLimitedSteadyRecheck`(15분)와 **같은 값을 쓰지 않는다**(셀프리뷰 M1).
+    ///   모델 한도 기록이 있는 계정에서 보류가 걸리면 재시도는 그 간격만큼 조회를 미루는데,
+    ///   두 값이 같으면 "다시 조회할 때"와 "포기할 때"가 같은 틱에 겹치고 TTL 검사가 먼저라
+    ///   **한 번도 새로 조회해 보지 못한 채** 최후 폴백으로 넘어갈 수 있다. 20분으로 벌려
+    ///   재시도가 반드시 한 번은 실제 조회를 하도록 보장한다.
+    private static let pendingHitVerifyTTL: TimeInterval = 20 * 60
     /// 수명이 다해 포기한 뒤 그 계정의 검증을 다시 시작하기까지의 간격.
     private static let verifyGiveUpBackoff: TimeInterval = 10 * 60
     /// 계정별 "당분간 조회 안 함" 시각. (트리거는 계속 쌓아 두고 **조회만** 쉰다.)
@@ -1155,6 +1169,10 @@ final class AppState: ObservableObject {
             // 같은 스냅샷이 계속 "트리거보다 나중"으로 통과해 매 틱 같은 답만 내고 새 조회가
             // 영영 안 일어난다(셀프리뷰 지적).
             pendingHitVerify[accountID]?.needsFresherThan = verifiedAt
+            // 계정 창은 여유인데 보류라면 그 이유는 모델 전용 한도뿐이다 — 최후 폴백이
+            // 이걸 계정 소진으로 잘못 기록하지 않도록 종류를 남긴다(위 필드 주석 참조).
+            pendingHitVerify[accountID]?.lastInconclusiveWasModelScoped =
+                HitAttribution.inconclusiveIsModelScoped(usage: snapshot)
             return
         case .notYetTrusted:
             // 모델 한도는 보이는데 전환 직후라 못 믿는다 → **트리거를 버린다.**
@@ -1204,7 +1222,12 @@ final class AppState: ObservableObject {
         guard let hit = trigger.logHit,
               now.timeIntervalSince(claudeActiveChangedAt) > HitAttribution.modelScopeTrustWindow
         else { return }
-        await record(hit, on: accountID, at: now)
+        // ★ 보류가 모델 전용 한도 때문이었다면 **그 종류로** 기록한다 — 로그 hit 자체는
+        //   모델을 모르므로(modelScoped=false) 그대로 쓰면 계정 전체 소진이 된다(H1).
+        let attributed = trigger.lastInconclusiveWasModelScoped
+            ? RateLimitHit(resetsAt: hit.resetsAt, kind: hit.kind, modelScoped: true)
+            : hit
+        await record(attributed, on: accountID, at: now)
     }
 
     /// 검증된 소진을 실제로 반영한다.

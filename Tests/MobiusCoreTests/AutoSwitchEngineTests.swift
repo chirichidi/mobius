@@ -141,7 +141,9 @@ final class AutoSwitchEngineTests: XCTestCase {
         // 리셋 직후(margin 60초 전): 아직
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(110)), .none)
         // 리셋 + margin 후: 복귀
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 41)),
+        // 쿨다운이 아니라 **margin** 테스트다(noteSwitched를 안 부르므로 쿨다운은 게이트가
+        // 아니다) — 쿨다운 상수에 묶으면 그 값을 바꿀 때 엉뚱하게 빨간불이 된다(셀프리뷰 L1).
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(100 + engine.margin + 1)),
                        .switchTo(primary.id, reason: .primaryRecovered))
     }
 
@@ -150,7 +152,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         _ = engine.onRateLimitHit(file: file,
                                   hit: RateLimitHit(resetsAt: t0.addingTimeInterval(3600)), now: t0)
         engine.noteSwitched(now: t0) // 호출자가 실제 전환 후 알려줌
-        // 쿨다운(120초) 내 primary 회복 틱 → 억제
+        // 쿨다운 내 primary 회복 틱 → 억제
         file.activeAccountID = fb1.id
         file.autoSwitchedFromPrimary = true
         file.accounts[0].rateLimit = nil
@@ -170,7 +172,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         // 호출자가 전환을 반영: primary 한도 기록, fb1 활성
         file.accounts[0].rateLimit = RateLimitInfo(resetsAt: t0.addingTimeInterval(3600), recordedAt: t0)
         file.activeAccountID = fb1.id
-        // 쿨다운(120초) 내 hit → 억제
+        // 쿨다운 내 hit → 억제
         XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(60)),
                        .none)
         // 경계 정각(t0 + cooldown): now < last + cooldown 이 거짓 → 허용
@@ -417,7 +419,7 @@ final class AutoSwitchEngineTests: XCTestCase {
 
     func testRecoveryGateBlocksOnAdvisoryOnlyDeparture() {
         // advisory만 보고 떠난 경우 primary에는 rateLimit이 없다 — 예전 가드는 이때 통째로
-        // 스킵돼 쿨다운(120초)만 지나면 복귀 → 2분 주기 핑퐁이 났다.
+        // 스킵돼 쿨다운만 지나면 복귀 → 2분 주기 핑퐁이 났다.
         file.activeAccountID = fb1.id
         file.autoSwitchedFromPrimary = true
         file.accounts[0].advisory = AdvisoryRecord(utilization: 95,
@@ -452,7 +454,9 @@ final class AutoSwitchEngineTests: XCTestCase {
         file.accounts[0].advisory = nil
         let engine = AutoSwitchEngine()
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(110)), .none)
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 41)),
+        // 쿨다운이 아니라 **margin** 테스트다(noteSwitched를 안 부르므로 쿨다운은 게이트가
+        // 아니다) — 쿨다운 상수에 묶으면 그 값을 바꿀 때 엉뚱하게 빨간불이 된다(셀프리뷰 L1).
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(100 + engine.margin + 1)),
                        .switchTo(primary.id, reason: .primaryRecovered))
     }
 

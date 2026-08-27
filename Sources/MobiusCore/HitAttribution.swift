@@ -143,6 +143,19 @@ public enum HitAttribution {
     /// **아니다.** 잘못된 24시간 폴백을 박아 멀쩡한 계정을 하루 막지도 않고, "여유"로
     /// 오해해 트리거를 태워 없애지도 않는다(둘을 같은 값으로 돌려주면 호출측이 트리거를
     /// 소비해 버려 그 소진은 영영 기록되지 않는다 — 셀프리뷰 지적).
+    /// 이번 `.inconclusive`가 **모델 전용 한도 때문**인가(계정 창은 여유였는가).
+    ///
+    /// ★ 최후 폴백(`giveUpVerification`)이 무엇으로 기록할지를 가른다. 로그 라인에는 모델
+    ///   이름이 없어 로그 hit은 항상 `modelScoped == false`이므로, 이 판별 없이 폴백을 쓰면
+    ///   "그 모델만 막힘"이 **계정 전체 소진**으로 기록된다 — 메뉴바가 빨개지고 CLI 라벨이
+    ///   틀리며, `autoSwitchMayLeave`가 `isLimited`에서 핀을 보기 전에 단락해 **사용자가
+    ///   고정해 둔 계정에서 강제로 밀려난다**(셀프리뷰 H1).
+    ///   `verdict`와 같은 순서로 판단한다 — 계정 창(소진/근접)이 먼저고, 아니면 모델 갈래다.
+    public static func inconclusiveIsModelScoped(usage: UsageSnapshot) -> Bool {
+        !usage.hasExhaustedAccountWindow()
+            && !usage.hasNearLimitAccountWindow(threshold: nearLimitPercent)
+    }
+
     /// - Parameter trustModelScope: 모델 전용 한도를 귀속 증거로 써도 되는가
     ///   (= 마지막 활성 계정 변경으로부터 `modelScopeTrustWindow`가 지났는가).
     /// API가 아직 100%를 안 보여줘도 "곧 그렇게 될" 수준이면 판정을 미루는 경계.

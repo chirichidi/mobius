@@ -531,6 +531,16 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     "방금 떠난 계정"을 구조적으로 못 담는다(claude 2.1.239 실측, 그의 머신에서 170시간 정지).
     응답 헤더(`anthropic-ratelimit-unified-*`)의 사용률도 인메모리에만 살아 외부 프로세스가
     붙을 지점이 없다. → 불확정 구간에는 **usage 조회가 유일한 안전 축**이다.
+    ★ **보류의 "종류"를 기억해야 최후 폴백이 거짓말을 안 한다(H1)** — 로그 라인에는 모델
+    이름이 없어 로그 hit은 **항상 `modelScoped == false`** 다(파서가 true를 세우는 곳은 P3
+    경로뿐이고 그건 이 경로로 안 온다). 그래서 모델 한도 때문에 보류된 트리거를 15분 뒤
+    최후 폴백이 그대로 기록하면 **계정 전체 소진**이 된다 → 메뉴바 빨강, CLI 라벨 오류,
+    그리고 `autoSwitchMayLeave`가 `isLimited`에서 **핀을 보기 전에 단락**하므로 사용자가
+    고정해 둔 계정에서 강제로 밀려난다. → `PendingTrigger.lastInconclusiveWasModelScoped`
+    (판별은 `HitAttribution.inconclusiveIsModelScoped` — 테스트 가능하게 코어 순수 함수).
+    ★ **`pendingHitVerifyTTL`(20분)과 `modelLimitedSteadyRecheck`(15분)은 일부러 벌려 둔다** —
+    같은 값이면 "다시 조회할 때"와 "포기할 때"가 같은 틱에 겹치고 TTL 검사가 먼저라
+    **한 번도 새로 조회 못 한 채** 폴백으로 넘어갈 수 있다.
     ★ **판정 순서: 계정 창 → 모델 한도.** 계정 창이 100%면 리셋 시각을 못 얻었어도 모델
     갈래로 내려가지 않는다 — 내려가면 완전히 소진된 계정이 "그 모델만 막힘"으로 기록돼
     폴백 후보로 남고 메뉴바도 빨강이 안 되며 핀이 걸려 있으면 자동 전환까지 멈춘다.
