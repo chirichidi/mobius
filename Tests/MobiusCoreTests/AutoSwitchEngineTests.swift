@@ -87,7 +87,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         let engine = AutoSwitchEngine()
         engine.noteSwitched(now: t0)                      // 방금 전환됨
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(30)), .none) // 쿨다운
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(121)),
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 1)),
                        .switchTo(fb1.id, reason: .activeExhausted)) // 쿨다운 후
     }
 
@@ -141,7 +141,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         // 리셋 직후(margin 60초 전): 아직
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(110)), .none)
         // 리셋 + margin 후: 복귀
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(161)),
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 41)),
                        .switchTo(primary.id, reason: .primaryRecovered))
     }
 
@@ -155,7 +155,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         file.autoSwitchedFromPrimary = true
         file.accounts[0].rateLimit = nil
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(60)), .none)
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(121)),
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 1)),
                        .switchTo(primary.id, reason: .primaryRecovered))
     }
 
@@ -174,10 +174,10 @@ final class AutoSwitchEngineTests: XCTestCase {
         XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(60)),
                        .none)
         // 경계 정각(t0 + cooldown): now < last + cooldown 이 거짓 → 허용
-        XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(120)),
+        XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(engine.cooldown)),
                        .switchTo(fb2.id, reason: .activeExhausted))
         // 쿨다운 경과 후 같은 hit → 전환
-        XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(121)),
+        XCTAssertEqual(engine.onRateLimitHit(file: file, hit: hit, now: t0.addingTimeInterval(engine.cooldown + 1)),
                        .switchTo(fb2.id, reason: .activeExhausted))
     }
 
@@ -354,7 +354,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         XCTAssertEqual(engine.checkAdvisory(file: f, activeID: primary.id,
                                             verifiedCandidate: fb2.id,
                                             alreadyAdvised: false,
-                                            now: t0.addingTimeInterval(121)),
+                                            now: t0.addingTimeInterval(engine.cooldown + 1)),
                        .switchTo(fb2.id, reason: .thresholdAdvisory))
 
         // 반대 방향: 임계값 전환 직후 → 소진 hit도 쿨다운에 막힌다
@@ -452,7 +452,7 @@ final class AutoSwitchEngineTests: XCTestCase {
         file.accounts[0].advisory = nil
         let engine = AutoSwitchEngine()
         XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(110)), .none)
-        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(161)),
+        XCTAssertEqual(engine.onTick(file: file, now: t0.addingTimeInterval(engine.cooldown + 41)),
                        .switchTo(primary.id, reason: .primaryRecovered))
     }
 
@@ -566,5 +566,18 @@ final class AutoSwitchEngineTests: XCTestCase {
             file: file, hit: RateLimitHit(resetsAt: t0.addingTimeInterval(3600), modelScoped: true),
             now: t0),
                        .switchTo(fb1.id, reason: .modelExhausted))
+    }
+
+    /// ★ **쿨다운은 실측된 재시도 지연 상한을 덮어야 한다** (이슈 #19, @Phantomn 2026-08-22).
+    ///
+    /// 사고 로그에서 각 한도 에러의 "그 요청이 시작된 시각"까지 되짚으니 재시도 지연이
+    /// **63초 ~ 2분 7초(127초)** 였다. 예전 값 120초는 그 상한보다 짧아서, 전환 전에 시작된
+    /// 턴이 남긴 옛 계정 에러가 쿨다운이 풀린 뒤 도착해 새 활성 계정의 소진으로 오인됐다.
+    ///
+    /// 이 단언이 없으면 쿨다운을 다시 120초로 낮춰도 다른 테스트는 전부 초록이다
+    /// (경계 테스트들이 상수 기준 상대값이라 어떤 값이든 통과한다 — 실패 기록 18 계열).
+    func testCooldownCoversMeasuredRetryCeiling() {
+        let measuredRetryCeiling: TimeInterval = 127   // 2m07s, 실측 상한
+        XCTAssertGreaterThan(AutoSwitchEngine().cooldown, measuredRetryCeiling)
     }
 }

@@ -86,12 +86,35 @@ final class HitAttributionTests: XCTestCase {
         else { return XCTFail("계정 창 소진은 전환 직후에도 기록돼야 한다") }
     }
 
-    /// 오래된 모델 한도 100%(리셋 시각 없음)가 멀쩡한 계정을 영영 "판정 보류"로 묶으면 안 된다 —
-    /// 보류는 15분 동안 60초마다 조회를 유발한다. `.inconclusive`는 **계정 창** 전용이다.
-    func testStaleScopedLimitDoesNotBlockDiscard() {
+    /// ★ **모델 한도 100% + 쓸 수 있는 리셋 시각 없음**은 `.discard`가 아니라 `.inconclusive`다.
+    ///
+    /// 한때 이 자리는 `.discard`를 단언했다 — "오래된 scoped 100%가 멀쩡한 계정을 영영
+    /// 보류로 묶는다"는 우려였다. 그 우려는 **보류에 상한이 없던 시절**의 것이고, 지금은
+    /// 보류가 15분(TTL) 뒤 최후 폴백으로 기록되며 그 뒤로는 `.skipAlreadyRecorded`로
+    /// 끊긴다 = **유한하고 수렴한다.** 반대로 `.discard`로 두면 실측으로 확인된 응답 형태
+    /// (`weekly_scoped`의 `resets_at: null` — 이슈 #19, @Phantomn 2026-08-16)에서
+    /// **그 모델로 막힌 사용자의 hit이 조용히 버려지고 백오프까지 걸린다.**
+    /// 두 위험을 저울질하면 "유한한 보류" 쪽이 낫다.
+    func testUnresolvableScopedLimitIsInconclusiveNotDiscard() {
         let usage = snapshot(fiveHour: 9, sevenDay: 16,
                              scoped: [ScopedUsageLimit(label: "Fable", percent: 100, resetsAt: nil)])
-        XCTAssertEqual(HitAttribution.verdict(usage: usage, now: now), .discard)
+        XCTAssertEqual(HitAttribution.verdict(usage: usage, now: now), .inconclusive)
+
+        // 이미 지난 리셋 시각도 같다 — 쓸 수 없는 값이라는 점에서 동일하다.
+        let past = snapshot(fiveHour: 9, sevenDay: 16,
+                            scoped: [ScopedUsageLimit(label: "Fable", percent: 100,
+                                                      resetsAt: now.addingTimeInterval(-60))])
+        XCTAssertEqual(HitAttribution.verdict(usage: past, now: now), .inconclusive)
+
+        // ★ 100%가 아니면(그냥 오래된 항목) 여전히 즉시 버린다 — 보류 대상이 아니다.
+        let idle = snapshot(fiveHour: 9, sevenDay: 16,
+                            scoped: [ScopedUsageLimit(label: "Fable", percent: 0, resetsAt: nil)])
+        XCTAssertEqual(HitAttribution.verdict(usage: idle, now: now), .discard)
+
+        // ★ 전환 직후(신뢰 창 안)에는 보류로 승격시키지 않는다 — 그 구간에서 이 신호는
+        //   귀속 증거가 못 되므로, 붙잡아 두면 남의 hit을 15분간 물고 있게 된다.
+        XCTAssertEqual(HitAttribution.verdict(usage: usage, now: now, trustModelScope: false),
+                       .discard)
     }
 
     /// 계정 창은 여유인데 **모델 전용 한도**(Fable 등)가 찼으면 그것도 진짜 소진이다 —

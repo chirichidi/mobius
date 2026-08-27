@@ -62,6 +62,21 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         return RateLimitHit(resetsAt: resetsAt, kind: .window, modelScoped: true)
     }
 
+    /// 모델 전용 한도가 100%인데 **쓸 수 있는 리셋 시각이 없는가**(누락/이미 지남).
+    ///
+    /// ★ 실측 근거(이슈 #19, @Phantomn 2026-08-16): 라이브 응답의 `weekly_scoped` 항목은
+    ///   `resets_at: null`로 온다 — 그 계정은 `percent: 0`이었지만 **필드 자체가 옵셔널**임이
+    ///   확인됐다. 그러면 `scopedExhaustionHit`의 `compactMap(\.resetsAt)`이 조용히 떨어뜨려
+    ///   "여유 있음"과 구분되지 않는다(= 100%로 막힌 사용자의 hit이 버려지고 백오프까지 걸린다).
+    ///   계정 창에 `hasExhaustedAccountWindow`로 만들어 둔 `.inconclusive` 구분을 여기에도 둔다.
+    public func hasUnresolvableScopedLimit(now: Date) -> Bool {
+        (scopedLimits ?? []).contains { limit in
+            guard limit.percent >= 100 else { return false }
+            guard let reset = limit.resetsAt else { return true }   // 시각 없음
+            return reset <= now                                      // 이미 지남
+        }
+    }
+
     /// **계정 창**(5시간/주간) 중 100%인 것이 있는가(리셋 시각의 유효성과 무관).
     /// `.inconclusive` 판정용 — "여유 있음"과 "소진인데 리셋 시각을 못 얻음"을 가른다.
     /// ★ 모델 전용 한도는 **일부러 제외한다**: 며칠 100%로 남아 있을 수 있어서, 포함하면

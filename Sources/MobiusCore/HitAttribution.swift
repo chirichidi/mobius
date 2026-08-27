@@ -171,6 +171,13 @@ public enum HitAttribution {
             // 신뢰 창은 오귀인을 5분 미루기만 할 뿐 막지 못한다(셀프리뷰 지적).
             return trustModelScope ? .record(scoped) : .notYetTrusted
         }
+        // 모델 한도가 100%인데 **쓸 수 있는 리셋 시각이 없다** — 위 갈래가 조용히 흘려보낸
+        // 경우다(실측: `weekly_scoped`의 `resets_at`은 null로 올 수 있다, @Phantomn).
+        // "여유 있음"과 같은 값으로 돌려주면 그 계정으로 막힌 사용자의 hit이 버려지고
+        // 백오프까지 걸린다 — 계정 창에 만들어 둔 구분(`.inconclusive`)을 여기에도 적용한다.
+        // ★ 단 **믿어도 되는 구간에서만**(trustModelScope) — 전환 직후엔 이 신호 자체가
+        //   귀속 증거가 못 되므로 보류로 승격시키면 남의 hit을 붙잡아 두게 된다.
+        if trustModelScope, usage.hasUnresolvableScopedLimit(now: now) { return .inconclusive }
         // ★ 한도에 바짝 붙은 경우의 보류는 **5시간 창에만** 적용한다. 주간 사용률은 주말
         //   즈음이면 정상적으로 95%를 넘는데, 거기에 이 규칙을 걸면 **남의 hit이 영영
         //   `.discard`에 도달하지 못해** 15분 내내 60초마다 조회하는 상태로 굳는다

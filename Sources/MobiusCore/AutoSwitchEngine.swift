@@ -34,7 +34,18 @@ public enum CandidateProbeAction: Equatable, Sendable {
 /// 프로바이더 풀당 1인스턴스 — 쿨다운/복귀 판단이 풀별로 독립이다.
 public final class AutoSwitchEngine: @unchecked Sendable {
     public let provider: Provider
-    public var cooldown: TimeInterval = 120   // 전환 직후 재전환 금지
+    /// 전환 직후 재전환 금지 간격.
+    ///
+    /// ★ **실측 근거로 정한 값**(이슈 #19, @Phantomn 2026-08-22): 사고 로그에서 각 한도
+    ///   에러의 "그 요청이 시작된 시각"까지 되짚으니 **재시도 지연이 63초 ~ 2분 7초(127초)**
+    ///   였다. 즉 예전 값 120초는 **한 요청 분량도 못 덮어서**, 전환 전에 시작된 턴이 남긴
+    ///   옛 계정 에러가 쿨다운이 풀린 뒤 도착해 새 활성 계정의 소진으로 오인됐다.
+    ///   180초는 그 상한(127초)에 여유를 둔 값이고, 같은 사고를 다루는 다른 창들
+    ///   (`HitAttribution.modelScopeTrustWindow` 300초)보다는 짧게 유지한다 —
+    ///   이건 "전환 직후 연쇄 전환 금지"이지 귀속 판정 자체가 아니기 때문이다.
+    /// ※ 이 값은 더 이상 **유일한** 방어가 아니다: 귀속은 usage 검증이 판정한다
+    ///   (`HitAttribution`). 쿨다운은 그 위에 얹은 연쇄 전환 방지 장치다.
+    public var cooldown: TimeInterval = 180
     public var margin: TimeInterval = 60      // 리셋 시각 + margin 후에만 복귀
     private var lastSwitchAt: Date = .distantPast
     private let lock = NSLock()
