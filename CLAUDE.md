@@ -35,7 +35,8 @@ Sources/MobiusCore/       앱·CLI 공유 코어 (전부 의존성 주입 → �
   CodexStatusRouter.swift  Codex 상태의 계정 귀속 — 전환 전 세션 파일 격리 (오염 방지 ★아래)
   SessionLogWatcher.swift  세션 로그 tail — (루트, 파서, 정책) 주입 제네릭 (네트워크 0)
   AutoSwitchEngine.swift   순수 상태머신, 풀당 1인스턴스 (쿨다운/마진/autoSwitchedFromPrimary,
-                           on/off는 풀별 autoSwitchByProvider — 기록 없는 풀은 켬; 모델스코프 pin)
+                           on/off는 풀별 autoSwitchByProvider — 기록 없는 풀은 켬; 모델스코프 pin;
+                           modelBlocked = 호출자가 usage 캐시로 계산한 "모델 창 소진" 계정 집합)
   UsageFetcher.swift       Claude usage 엔드포인트 조회 (게이지용, 팝오버 열 때만; Codex는 로그로 대체)
                            모델 스코프 주간 한도(weekly_scoped)도 파싱 → ScopedUsageLimit
   SyncEngine.swift         멀티 Mac 동기화 (클라우드 폴더 미러, ★ 아래 '동기화 원칙')
@@ -580,6 +581,22 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     사용자에게 거짓말이 된다(`notifyModelLimitedOnly`, `SwitchReason.modelExhausted`).
     (3) 개발 Mac 세션 로그 한 달치에 창 소진 이벤트가 **0건**이었다 — 자체 발견이 사실상
     불가능한, 규모가 조건인 버그(13·17·20과 같은 클래스). 외부 제보가 유일한 발견 경로다.
+22. **모델 한도로 떠날 때 후보를 "기록"으로만 걸러 Fable 100%인 폴백으로 옮김 (외부 제보, 2026-09-11)** —
+    `firstAvailable(avoidModelLimited:)`는 `isModelLimited`(= 그 계정의 `rateLimit` 기록)만 봤다.
+    그 기록은 **그 계정이 활성일 때 hit을 맞아야** 생기므로, 한 번도 활성이 아니었던 폴백은
+    게이지에 Fable 100%가 떠 있어도 기록이 없어 정상 후보로 뽑힌다. 사용자(Fable 사용 중)가
+    옮겨진 폴백에서 같은 에러를 맞고 → usage 검증으로 그제서야 기록 → 쿨다운(180초) 뒤 다음
+    폴백으로 또 이동 — 폴백마다 한 번씩 헛돌며 "계속 Fable이 가득 찬 워크스페이스로 바뀐다"고
+    보인다. 같은 이메일의 회사 Team·Enterprise가 폴백으로 붙은 구성(Fable은 조직마다 따로
+    소진)에서 바로 드러났다.
+    → 엔진 `onRateLimitHit`/`onTick`에 `modelBlocked: Set<UUID>`를 받고, AppState가
+    `usage[id].scopedExhaustionHit(now:)`(팝오버·advisory 폴링이 채운 캐시, 네트워크 0)로 계산해
+    넘긴다. **모델 한도 때문에 떠날 때만** 거른다 — 계정 소진으로 떠날 때 걸러내면 이슈 #19의
+    "모든 계정 소진"이 재발한다(테스트로 못 박음). 캐시가 없는 계정은 모른다고 보고 후보로 둔다
+    (예전 동작). 이슈 #24 "함께 볼 것"의 모델 라벨 스키마(어느 모델이 막혔는지)는 별건으로 남는다 —
+    지금은 스코프 창이 Fable 하나라 라벨 없이도 맞지만, 둘 이상이 되면 라벨 대조가 필요하다.
+    교훈: 후보를 거르는 조건과 그 조건의 **정보원**이 다르면(기록 vs 게이지) 한쪽만 아는 사실이
+    결정에서 빠진다 — 게이지가 이미 아는 것을 결정이 모르면 사용자는 화면과 동작이 어긋난다고 느낀다.
 
 ## QA / 진행 상황
 
