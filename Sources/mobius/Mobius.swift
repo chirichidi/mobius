@@ -74,8 +74,7 @@ struct List: AsyncParsableCommand {
                 let role = i == 0 ? "primary " : "fallback\(i)"
                 let reauth = p.needsReauth ? "  [재로그인 필요]" : ""
                 // 회사 조직(Team/Enterprise) 이름을 함께 적는다 — 같은 이메일의 계정이 여럿일 때 구분 근거.
-                let org = p.organizationLabel.isEmpty ? "" : "\(p.organizationLabel) · "
-                print("  \(active) \(role)  \(p.nickname)  <\(p.emailAddress)>  \(org)\(p.tierDescription)\(fmtReset(p))\(reauth)")
+                print("  \(active) \(role)  \(p.nickname)  <\(p.emailAddress)>  \(p.subtitle)\(fmtReset(p))\(reauth)")
             }
         }
     }
@@ -189,8 +188,7 @@ struct Capture: ParsableCommand {
         }
         try ctx.store.setActive(p.id)
         MobiusNotification.postAccountsChanged()
-        let org = p.organizationLabel.isEmpty ? "" : "\(p.organizationLabel) · "
-        print("캡처 완료: [\(p.provider.displayName)] \(p.nickname) <\(p.emailAddress)> \(org)\(p.tierDescription)")
+        print("캡처 완료: [\(p.provider.displayName)] \(p.nickname) <\(p.emailAddress)> \(p.subtitle)")
     }
 
     /// 같은 풀의 **다른** 계정이 이미 쓰는 닉네임이면 거부한다 — 같은 이름이 둘이면 `switch`가 고를

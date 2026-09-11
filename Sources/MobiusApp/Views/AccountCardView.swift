@@ -171,8 +171,7 @@ struct AccountCardView: View {
                 .font(.system(size: 10)).foregroundStyle(.orange)
         } else {
             // 회사 조직(Team/Enterprise)이면 이름을 앞에 적는다 — 같은 이메일의 계정이 여럿일 때 구분 근거.
-            let org = profile.organizationLabel
-            Text(org.isEmpty ? profile.tierDescription : "\(org) · \(profile.tierDescription)")
+            Text(profile.subtitle)
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
     }

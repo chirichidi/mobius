@@ -135,10 +135,13 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return identity(fromOAuthBlock: block)
     }
 
-    /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로
+    /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로.
+    /// Team 워크스페이스의 oauthAccount는 organizationType·organizationRateLimitTier가 **둘 다 null**이고
+    /// `seatTier: "team_tier_1"`만 온다(실측 2026-09-11) — 그래서 seatTier까지 폴백한다("Team Tier 1").
     static func tierDescription(from block: [String: Any]) -> String {
         let tier = (block["organizationRateLimitTier"] as? String)
-            ?? (block["organizationType"] as? String) ?? ""
+            ?? (block["organizationType"] as? String)
+            ?? (block["seatTier"] as? String) ?? ""
         return tier.replacingOccurrences(of: "default_", with: "")
             .replacingOccurrences(of: "claude_", with: "")
             .replacingOccurrences(of: "_", with: " ")

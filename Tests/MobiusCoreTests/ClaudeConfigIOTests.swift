@@ -52,6 +52,13 @@ final class ClaudeConfigIOTests: XCTestCase {
         XCTAssertEqual(identity.organizationName, "acme-team")
         XCTAssertEqual(identity.tierDescription, "Team")
 
+        // Team 워크스페이스 실측: organizationType·organizationRateLimitTier가 null, seatTier만 온다
+        let teamSeat = #"{"oauthAccount":{"emailAddress":"p@x.com","organizationName":"acme-team","organizationType":null,"organizationRateLimitTier":null,"seatTier":"team_tier_1","organizationUuid":"5d1f0c9e-0000-0000-0000-000000000000"}}"#
+        try Data(teamSeat.utf8).write(to: env.claudeJSON)
+        XCTAssertEqual(try XCTUnwrap(io.liveIdentity()).tierDescription, "Team Tier 1",
+                       "등급 필드가 전부 null이면 seatTier로 폴백해야 부제가 비지 않는다")
+        try Data(withOrg.utf8).write(to: env.claudeJSON)
+
         // 스냅샷에서도 같은 신원이 나온다(구버전 프로필 조직 채우기·CLI capture가 쓰는 경로)
         let snap = try XCTUnwrap(io.readLiveSnapshot())
         XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: snap)?.key, identity.key)

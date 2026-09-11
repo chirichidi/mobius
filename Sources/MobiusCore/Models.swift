@@ -166,6 +166,11 @@ public struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
         Self.isPersonalOrganizationName(organizationName, email: emailAddress) ? "" : organizationName
     }
 
+    /// 카드·CLI의 부제 — 조직 이름과 등급 중 **있는 것만** " · "로 잇는다(빈 쪽이 있으면 구분자도 없다).
+    public var subtitle: String {
+        [organizationLabel, tierDescription].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
     /// 개인 구독의 자동 생성 조직인가 — 실측 형태는 `"<이메일>'s Organization"`. 휴리스틱이라
     /// 틀려도 결과는 "조직 이름을 표시하느냐" 정도의 차이뿐이다(대조에는 쓰지 않는다).
     public static func isPersonalOrganizationName(_ name: String, email: String) -> Bool {

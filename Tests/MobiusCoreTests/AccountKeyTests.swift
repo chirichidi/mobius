@@ -89,6 +89,18 @@ final class AccountKeyTests: XCTestCase {
         XCTAssertEqual(AccountsFile.nicknameSlug("!!!"), "")
     }
 
+    func testSubtitleJoinsOnlyNonEmptyParts() {
+        var p = profile("a", "leo@x.com", org: "o")
+        p.organizationName = "acme-team"; p.tierDescription = "Team"
+        XCTAssertEqual(p.subtitle, "acme-team · Team")
+        p.tierDescription = ""
+        XCTAssertEqual(p.subtitle, "acme-team", "등급이 비면 구분자 꼬리가 남지 않아야 한다")
+        p.organizationName = "leo@x.com's Organization"; p.tierDescription = "Max 20X"
+        XCTAssertEqual(p.subtitle, "Max 20X")
+        p.tierDescription = ""
+        XCTAssertEqual(p.subtitle, "")
+    }
+
     func testOrganizationLabelHidesPersonalAutoOrganization() {
         XCTAssertEqual(profile("a", "leo@x.com", org: "o").organizationLabel, "")
         var p = profile("a", "leo@x.com", org: "o")
