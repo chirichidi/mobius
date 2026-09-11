@@ -24,12 +24,17 @@ func makeContext(healProviders: Bool = false) throws -> (
     let io = ClaudeConfigIO(env: env, keychain: kc)
     let codexIO = CodexConfigIO(env: env)
     let switcher = Switcher(env: env, keychain: kc, store: store, io: io, extraIOs: [codexIO])
-    if healProviders,
-       let reassigned = try? switcher.healMisassignedProviders(), !reassigned.isEmpty {
-        for r in reassigned {
-            FileHandle.standardError.write(Data(
-                "⚠️ 프로바이더 정보 소실을 복구했습니다: \(r.nickname) (\(r.from.rawValue) → \(r.to.rawValue))\n".utf8))
+    if healProviders {
+        if let reassigned = try? switcher.healMisassignedProviders(), !reassigned.isEmpty {
+            for r in reassigned {
+                FileHandle.standardError.write(Data(
+                    "⚠️ 프로바이더 정보 소실을 복구했습니다: \(r.nickname) (\(r.from.rawValue) → \(r.to.rawValue))\n".utf8))
+            }
         }
+        // 구버전 프로필(조직 미상)에 저장 스냅샷의 organizationUuid를 채운다 — 같은 이메일의 다른
+        // 조직 로그인이 이 프로필을 덮어쓰지 않게(실패 기록 22). 비밀 파일이 있는 계정만 읽으므로
+        // 승인창은 뜨지 않는다.
+        _ = try? switcher.backfillOrganizationUUIDs()
     }
     return (env, store, io, codexIO, switcher)
 }
@@ -68,7 +73,9 @@ struct List: AsyncParsableCommand {
                 let active = p.id == ctx.store.file.activeByProvider[provider] ? "●" : "○"
                 let role = i == 0 ? "primary " : "fallback\(i)"
                 let reauth = p.needsReauth ? "  [재로그인 필요]" : ""
-                print("  \(active) \(role)  \(p.nickname)  <\(p.emailAddress)>  \(p.tierDescription)\(fmtReset(p))\(reauth)")
+                // 회사 조직(Team/Enterprise) 이름을 함께 적는다 — 같은 이메일의 계정이 여럿일 때 구분 근거.
+                let org = p.organizationLabel.isEmpty ? "" : "\(p.organizationLabel) · "
+                print("  \(active) \(role)  \(p.nickname)  <\(p.emailAddress)>  \(org)\(p.tierDescription)\(fmtReset(p))\(reauth)")
             }
         }
     }
@@ -92,8 +99,16 @@ struct Switch: ParsableCommand {
             throw ValidationError("'\(name)' 계정 없음. 등록된 계정: \(names)")
         }
         guard matches.count == 1 else {
+            if Set(matches.map(\.provider)).count > 1 {
+                throw ValidationError(
+                    "'\(name)' 닉네임이 여러 프로바이더에 있습니다. --provider claude|codex 로 지정하세요.")
+            }
+            // 같은 풀 안의 중복 — 같은 이메일의 다른 조직을 같은 이름으로 capture한 경우.
+            let orgs = matches.map { $0.organizationLabel.isEmpty ? $0.tierDescription : $0.organizationLabel }
+                .joined(separator: ", ")
             throw ValidationError(
-                "'\(name)' 닉네임이 여러 프로바이더에 있습니다. --provider claude|codex 로 지정하세요.")
+                "'\(name)' 닉네임의 계정이 같은 프로바이더에 여러 개입니다 (\(orgs)). "
+                + "그 계정으로 로그인한 뒤 `mobius capture <다른 닉네임>`으로 이름을 바꾸세요.")
         }
         try ctx.switcher.switchTo(target.id)
         // 사용자의 의지로 전환 — 앱 onTick의 primary 자동 복귀 대상이 아니다
@@ -126,7 +141,8 @@ struct Status: AsyncParsableCommand {
             guard let active = ctx.store.file.active(of: provider) else { continue }
             let role = active.id == ctx.store.file.primary(of: provider)?.id
                 ? "primary" : "fallback"
-            print("[\(provider.displayName)] 활성: \(active.nickname) <\(active.emailAddress)> (\(role))\(fmtReset(active))")
+            let org = active.organizationLabel.isEmpty ? "" : " \(active.organizationLabel)"
+            print("[\(provider.displayName)] 활성: \(active.nickname) <\(active.emailAddress)>\(org) (\(role))\(fmtReset(active))")
             printedAny = true
         }
         if !printedAny {
@@ -155,18 +171,39 @@ struct Capture: ParsableCommand {
             guard let snap = try ctx.io.readLiveSnapshot() else {
                 throw ValidationError("claude 로그인 상태가 아닙니다. 먼저 `claude`에서 /login 하세요.")
             }
+            guard let identity = ClaudeConfigIO.identity(fromSnapshot: snap) else {
+                throw ValidationError("~/.claude.json 에 계정 정보(oauthAccount)가 없습니다. `claude`에서 다시 로그인하세요.")
+            }
+            try Self.rejectNicknameTakenByAnotherAccount(name, provider: .claude,
+                                                        identity: identity, store: ctx.store)
             p = try ctx.store.upsertProfile(nickname: name, snapshot: snap)
         case .codex:
             guard let data = try ctx.codexIO.readLiveSecretData(),
                   let identity = try ctx.codexIO.liveIdentity() else {
                 throw ValidationError("codex 로그인 상태가 아닙니다. 먼저 `codex login` 하세요.")
             }
+            try Self.rejectNicknameTakenByAnotherAccount(name, provider: .codex,
+                                                        identity: identity, store: ctx.store)
             p = try ctx.store.upsertProfile(nickname: name, provider: .codex,
                                             identity: identity, secretData: data)
         }
         try ctx.store.setActive(p.id)
         MobiusNotification.postAccountsChanged()
-        print("캡처 완료: [\(p.provider.displayName)] \(p.nickname) <\(p.emailAddress)> \(p.tierDescription)")
+        let org = p.organizationLabel.isEmpty ? "" : "\(p.organizationLabel) · "
+        print("캡처 완료: [\(p.provider.displayName)] \(p.nickname) <\(p.emailAddress)> \(org)\(p.tierDescription)")
+    }
+
+    /// 같은 풀의 **다른** 계정이 이미 쓰는 닉네임이면 거부한다 — 같은 이름이 둘이면 `switch`가 고를
+    /// 수 없다. 같은 계정(열쇠 일치)의 재캡처(토큰 갱신·이름 변경)는 통과한다.
+    static func rejectNicknameTakenByAnotherAccount(_ name: String, provider: Provider,
+                                                    identity: ProviderIdentity,
+                                                    store: AccountStore) throws {
+        let sameAccount = store.file.firstAccount(provider: provider, matching: identity.key)?.id
+        guard let other = store.file.accounts(of: provider)
+            .first(where: { $0.nickname == name && $0.id != sameAccount }) else { return }
+        let what = other.organizationLabel.isEmpty ? other.tierDescription : other.organizationLabel
+        throw ValidationError(
+            "'\(name)' 닉네임은 이미 다른 계정(<\(other.emailAddress)> \(what))이 쓰고 있습니다. 다른 닉네임을 지정하세요.")
     }
 }
 

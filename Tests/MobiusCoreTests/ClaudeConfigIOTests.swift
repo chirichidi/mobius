@@ -38,6 +38,25 @@ final class ClaudeConfigIOTests: XCTestCase {
         XCTAssertNil(try io.readLiveSnapshot())
     }
 
+    /// 계정 열쇠 = 이메일 + organizationUuid. 조직 필드가 없는 옛 claude.json은 ""(조직 미상).
+    func testLiveAccountKeyCarriesOrganizationUuid() throws {
+        try seedLive()
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "p@x.com"))
+
+        let withOrg = #"{"oauthAccount":{"emailAddress":"p@x.com","organizationName":"acme-team","organizationType":"claude_team","organizationUuid":"5d1f0c9e-0000-0000-0000-000000000000"}}"#
+        try Data(withOrg.utf8).write(to: env.claudeJSON)
+        XCTAssertEqual(try io.liveAccountKey(),
+                       AccountKey(emailAddress: "p@x.com", organizationUuid: "5d1f0c9e-0000-0000-0000-000000000000"))
+        let identity = try XCTUnwrap(io.liveIdentity())
+        XCTAssertEqual(identity.organizationUuid, "5d1f0c9e-0000-0000-0000-000000000000")
+        XCTAssertEqual(identity.organizationName, "acme-team")
+        XCTAssertEqual(identity.tierDescription, "Team")
+
+        // 스냅샷에서도 같은 신원이 나온다(구버전 프로필 조직 채우기·CLI capture가 쓰는 경로)
+        let snap = try XCTUnwrap(io.readLiveSnapshot())
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: snap)?.key, identity.key)
+    }
+
     func testWritePreservesOtherKeys() throws {
         try seedLive()
         var snap = try XCTUnwrap(io.readLiveSnapshot())

@@ -170,7 +170,9 @@ struct AccountCardView: View {
             Label(loc("리셋까지 %d시간 %d분", mins / 60, mins % 60), systemImage: "hourglass")
                 .font(.system(size: 10)).foregroundStyle(.orange)
         } else {
-            Text(profile.tierDescription)
+            // 회사 조직(Team/Enterprise)이면 이름을 앞에 적는다 — 같은 이메일의 계정이 여럿일 때 구분 근거.
+            let org = profile.organizationLabel
+            Text(org.isEmpty ? profile.tierDescription : "\(org) · \(profile.tierDescription)")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }
     }

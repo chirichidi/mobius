@@ -6,11 +6,12 @@ final class SwitcherTests: XCTestCase {
     var store: AccountStore!; var io: ClaudeConfigIO!; var switcher: Switcher!
     var personal: AccountProfile!; var work: AccountProfile!
 
-    func snap(email: String, tok: String) -> CredentialsSnapshot {
-        CredentialsSnapshot(
+    func snap(email: String, tok: String, org: String = "") -> CredentialsSnapshot {
+        let orgField = org.isEmpty ? "" : #","organizationUuid":"\#(org)""#
+        return CredentialsSnapshot(
             keychainBlob: Data(#"{"tok":"\#(tok)"}"#.utf8),
             credentialsFileData: Data(#"{"tok":"\#(tok)"}"#.utf8),
-            oauthAccountJSON: Data(#"{"emailAddress":"\#(email)","organizationName":"O"}"#.utf8))
+            oauthAccountJSON: Data(#"{"emailAddress":"\#(email)","organizationName":"O"\#(orgField)}"#.utf8))
     }
 
     /// 실제 Claude blob 형태(refreshToken 포함) — 딱지 해제 판정이 읽는 필드가 들어 있다.
@@ -83,6 +84,79 @@ final class SwitcherTests: XCTestCase {
         try io.writeLiveSnapshot(snap(email: "stranger@x.com", tok: "S"))
         try await switcher.reconcile()
         XCTAssertEqual(store.file.activeAccountID, personal.id) // 그대로
+    }
+
+    // MARK: 계정 열쇠 = 이메일 + 조직 (실패 기록 22)
+    // 한 이메일이 개인 Max·회사 Team·회사 Enterprise에 동시에 속한다. 이메일만으로 대조하면
+    // 두 번째 조직으로 로그인한 순간 첫 프로필이 그 조직의 토큰으로 덮어써진다.
+
+    /// 같은 이메일의 **다른 조직**으로 밖에서 로그인해도 기존 프로필을 건드리지 않는다.
+    func testReconcileDoesNotMergeDifferentOrganizationOnSameEmail() async throws {
+        let team = try store.upsertProfile(nickname: "team", snapshot: snap(email: "t@x.com", tok: "T0", org: "org-team"))
+        try io.writeLiveSnapshot(snap(email: "t@x.com", tok: "T0", org: "org-team"))
+        try store.setActive(team.id)
+
+        // 같은 이메일, 다른 조직(개인 Max)으로 외부 로그인
+        try io.writeLiveSnapshot(snap(email: "t@x.com", tok: "M-ext", org: "org-max"))
+        try await switcher.reconcile()
+
+        XCTAssertEqual(try store.secret(for: team.id)?.keychainBlob, Data(#"{"tok":"T0"}"#.utf8),
+                       "다른 조직의 토큰이 Team 프로필에 저장되면 안 된다")
+        XCTAssertEqual(store.file.accounts.count, 3, "reconcile은 모르는 계정을 등록하지 않는다(adopt 몫)")
+    }
+
+    /// 같은 이메일의 두 번째 조직은 adopt가 **새 프로필**로 흡수한다 — 닉네임은 겹치지 않게.
+    func testAdoptRegistersSecondOrganizationOnSameEmail() async throws {
+        let team = try store.upsertProfile(nickname: "t", snapshot: snap(email: "t@x.com", tok: "T0", org: "org-team"))
+        try io.writeLiveSnapshot(snap(email: "t@x.com", tok: "M0", org: "org-max"))
+
+        let adopted = try await switcher.adoptLiveAccountIfUnregistered()
+        let max = try XCTUnwrap(adopted)
+        XCTAssertNotEqual(max.id, team.id)
+        XCTAssertEqual(max.organizationUuid, "org-max")
+        XCTAssertNotEqual(max.nickname, "t", "같은 풀에서 닉네임이 겹치면 CLI switch가 고를 수 없다")
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+        XCTAssertEqual(try store.secret(for: team.id)?.keychainBlob, Data(#"{"tok":"T0"}"#.utf8))
+        XCTAssertEqual(try store.secret(for: max.id)?.keychainBlob, Data(#"{"tok":"M0"}"#.utf8))
+
+        // 이미 등록된 조직이면 다시 흡수하지 않는다
+        let again = try await switcher.adoptLiveAccountIfUnregistered()
+        XCTAssertNil(again)
+    }
+
+    /// 같은 이메일의 두 조직 사이를 전환하면 라이브 열쇠가 바뀌고, 떠나는 쪽의 최신 토큰은 **자기**
+    /// 프로필에만 되저장된다.
+    func testSwitchBetweenOrganizationsOnSameEmail() throws {
+        let team = try store.upsertProfile(nickname: "team", snapshot: snap(email: "t@x.com", tok: "T0", org: "org-team"))
+        let max = try store.upsertProfile(nickname: "max", snapshot: snap(email: "t@x.com", tok: "M0", org: "org-max"))
+        try io.writeLiveSnapshot(snap(email: "t@x.com", tok: "T1", org: "org-team")) // claude가 갱신한 상태
+        try store.setActive(team.id)
+
+        try switcher.switchTo(max.id)
+
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-max"))
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+        XCTAssertEqual(try store.secret(for: team.id)?.keychainBlob, Data(#"{"tok":"T1"}"#.utf8),
+                       "떠나는 Team의 갱신 토큰은 Team 프로필에")
+        XCTAssertEqual(try store.secret(for: max.id)?.keychainBlob, Data(#"{"tok":"M0"}"#.utf8),
+                       "Max 프로필은 그대로")
+    }
+
+    /// 구버전 프로필(조직 미상)은 저장 스냅샷의 oauthAccount에서 조직을 채운다 — 라이브를 보지 않는다.
+    func testBackfillOrganizationUUIDsFromStoredSnapshot() throws {
+        // 구버전 바이너리가 만든 상태를 흉내 낸다: 스냅샷엔 조직이 있는데 프로필 필드는 비어 있다
+        let legacy = try store.upsertProfile(nickname: "old", snapshot: snap(email: "o@x.com", tok: "O0", org: "org-old"))
+        try store.update(legacy.id) { $0.organizationUuid = "" }
+        // 라이브는 같은 이메일의 **다른** 조직 — 여기서 채우면 오귀속이다
+        try io.writeLiveSnapshot(snap(email: "o@x.com", tok: "N0", org: "org-new"))
+
+        let filled = try switcher.backfillOrganizationUUIDs()
+
+        XCTAssertEqual(filled, [legacy.id])
+        XCTAssertEqual(store.file.accounts.first { $0.id == legacy.id }?.organizationUuid, "org-old")
+        // 이미 채워진 프로필과 조직 정보가 없는 스냅샷은 건드리지 않는다
+        XCTAssertEqual(try switcher.backfillOrganizationUUIDs(), [])
+        XCTAssertEqual(store.file.accounts.first { $0.id == personal.id }?.organizationUuid, "")
     }
 
     // MARK: refreshActiveSnapshotIfStable — 신선도 계약(반환값)

@@ -110,12 +110,29 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return Self.identity(fromOAuthBlock: block)
     }
 
+    /// 이메일 + organizationUuid — `liveEmail`과 같은 파일 한 번 읽기(승인창 없음).
+    public func liveAccountKey() throws -> AccountKey? {
+        guard let block = try readOAuthAccountDict() else { return nil }
+        return Self.identity(fromOAuthBlock: block)?.key
+    }
+
     /// oauthAccount 블록 → 표시용 신원. 라이브 읽기와 스냅샷 기반 등록(AccountStore)이 공유.
+    /// organizationUuid가 없는 옛 claude.json이면 ""(조직 미상)으로 둔다 — 이메일만으로 대조된다.
     public static func identity(fromOAuthBlock block: [String: Any]) -> ProviderIdentity? {
         guard let email = block["emailAddress"] as? String else { return nil }
         return ProviderIdentity(emailAddress: email,
                                 organizationName: block["organizationName"] as? String ?? "",
-                                tierDescription: tierDescription(from: block))
+                                tierDescription: tierDescription(from: block),
+                                organizationUuid: block["organizationUuid"] as? String ?? "")
+    }
+
+    /// 저장 스냅샷의 oauthAccount 블록에서 신원을 꺼낸다 — 라이브를 보지 않으므로 "그 스냅샷이
+    /// 어느 계정·조직의 것인가"를 정확히 답한다(구버전 프로필의 조직 UUID 채우기, CLI capture).
+    public static func identity(fromSnapshot snap: CredentialsSnapshot) -> ProviderIdentity? {
+        guard let json = snap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any]
+        else { return nil }
+        return identity(fromOAuthBlock: block)
     }
 
     /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로
