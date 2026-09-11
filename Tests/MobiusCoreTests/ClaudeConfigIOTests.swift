@@ -38,6 +38,27 @@ final class ClaudeConfigIOTests: XCTestCase {
         XCTAssertNil(try io.readLiveSnapshot())
     }
 
+    /// 안정 읽기는 두 읽기 사이에 **조직이 바뀌면**(같은 이메일·같은 토큰이라도) 불안정으로 본다 —
+    /// 같은 이메일의 다른 워크스페이스로 로그인이 끝나는 찰나에 옛 토큰과 새 조직이 짝지어지는 것을 막는다.
+    func testStableReadRejectsOrganizationChangeBetweenReads() async throws {
+        try seedLive()
+        func claudeJSON(org: String) -> Data {
+            Data(#"{"oauthAccount":{"emailAddress":"p@x.com","organizationName":"O","organizationUuid":"\#(org)"}}"#.utf8)
+        }
+        try claudeJSON(org: "org-A").write(to: env.claudeJSON)
+        let stable = await io.readStableLiveSnapshot(gap: .milliseconds(50))
+        XCTAssertNotNil(stable, "변화가 없으면 안정")
+
+        let url = env.claudeJSON
+        let flip = Task.detached {
+            try? await Task.sleep(for: .milliseconds(120))
+            try? claudeJSON(org: "org-B").write(to: url)
+        }
+        let unstable = await io.readStableLiveSnapshot(gap: .milliseconds(400))
+        await flip.value
+        XCTAssertNil(unstable, "토큰·이메일이 같아도 조직이 바뀌면 불안정으로 봐야 한다")
+    }
+
     /// 계정 열쇠 = 이메일 + organizationUuid. 조직 필드가 없는 옛 claude.json은 ""(조직 미상).
     func testLiveAccountKeyCarriesOrganizationUuid() throws {
         try seedLive()
