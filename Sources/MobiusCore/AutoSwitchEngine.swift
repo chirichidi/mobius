@@ -84,7 +84,7 @@ public final class AutoSwitchEngine: @unchecked Sendable {
     ///   사용자는 다른 모델을 쓸 수 있다(이슈 #19 후속: 이걸 구분 안 하면 며칠짜리 모델
     ///   한도 하나가 폴백을 통째로 지워 "모든 계정 한도 소진"이 난다).
     /// - Parameter modelBlocked: **사용량 캐시가 모델 창 소진을 보여주는 계정들**(호출자가
-    ///   `UsageSnapshot.scopedExhaustionHit`로 계산). `isModelLimited`는 그 계정이 **활성일 때
+    ///   `UsageSnapshot.modelWindowBlocked`로 계산). `isModelLimited`는 그 계정이 **활성일 때
     ///   hit을 맞아야** 생기는 기록이라, 한 번도 활성이 아니었던 폴백은 Fable이 100%여도 기록이
     ///   없다 — 그 폴백으로 옮기면 사용자는 같은 에러를 다시 보고, 그제서야 기록이 생겨 다음
     ///   폴백으로 또 옮긴다(실패 기록 22: 폴백마다 한 번씩 헛돈다). 모델 한도 때문에 떠날 때만
