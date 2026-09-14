@@ -53,9 +53,35 @@ final class AccountKeyTests: XCTestCase {
         let keyB = AccountKey(emailAddress: "p@x.com", organizationUuid: "org-B")
         XCTAssertEqual(file.firstAccount(provider: .claude, matching: keyB)?.id, legacy.id,
                        "정확한 프로필이 없으면 조직 미상 프로필이 이메일로 맞는다(구버전 동작 유지)")
-        // 열쇠 쪽이 조직을 모르면(옛 claude.json) 이메일이 같은 첫 프로필
-        XCTAssertEqual(file.firstAccount(provider: .claude,
+        // ★ 열쇠 쪽이 조직을 모르는데(옛 claude.json) 이메일이 같은 후보가 둘이면 **nil**이다 —
+        //   배열 순서로 아무거나 잡으면 남의 조직 토큰을 그 프로필에 저장하고 setActive까지 간다.
+        //   모호하면 손대지 않는다(실패 기록 21): 소비자는 다음 틱에 다시 본다.
+        XCTAssertNil(file.firstAccount(provider: .claude,
+                                       matching: AccountKey(emailAddress: "p@x.com")))
+        // 후보가 하나뿐이면 예전 그대로 이메일로 맞는다 — Codex와 단일 프로필 사용자의 경로다.
+        let solo = AccountsFile(accounts: [legacy])
+        XCTAssertEqual(solo.firstAccount(provider: .claude,
                                          matching: AccountKey(emailAddress: "p@x.com"))?.id, legacy.id)
+    }
+
+    /// 조직 미상 프로필이 여럿이면 **열쇠가 조직을 알아도** 고르지 않는다 — backfill이 실패한
+    /// (비밀 파일이 없는) 프로필이 같은 이메일로 둘 남은 경우다. 정확히 맞는 프로필이 없는데
+    /// 이메일 폴백 후보가 여럿이라면 어느 쪽인지 알 방법이 없다.
+    func testFirstAccountStaysSilentWhenSeveralLegacyProfilesShareEmail() {
+        let a = profile("legacy-a", "p@x.com", org: "")
+        let b = profile("legacy-b", "p@x.com", org: "")
+        let file = AccountsFile(accounts: [a, b])
+        XCTAssertNil(file.firstAccount(provider: .claude,
+                                       matching: AccountKey(emailAddress: "p@x.com",
+                                                            organizationUuid: "org-A")))
+        XCTAssertNil(file.firstAccount(provider: .claude,
+                                       matching: AccountKey(emailAddress: "p@x.com")))
+        // 조직을 채운 프로필이 하나 생기면 그 열쇠는 다시 정확히 맞는다.
+        var healed = file
+        healed.accounts[0].organizationUuid = "org-A"
+        XCTAssertEqual(healed.firstAccount(provider: .claude,
+                                           matching: AccountKey(emailAddress: "p@x.com",
+                                                                organizationUuid: "org-A"))?.id, a.id)
     }
 
     func testSuggestedNicknameDisambiguatesSameEmailByOrganization() {

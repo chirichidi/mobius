@@ -15,6 +15,9 @@ struct MobiusCLI: AsyncParsableCommand {
 ///   에서만 켠다** — heal은 계정당 secret 파일을 읽고(레거시 계정은 Keychain 폴백까지),
 ///   교정 시 accounts.json을 저장하므로 읽기 전용 명령(list/status)에는 과하다(리뷰 반영).
 ///   미복구 상태의 표시 오류는 앱 실행 시 또는 전환 시점 heal이 잡는다.
+///   ★ `backfillOrganizationUUIDs`도 같은 게이트를 쓴다 — 그래서 업그레이드 후 앱을 아직 안 켠
+///   사용자에게는 `list`/`status`에 조직 이름이 안 뜬다. 의도한 동작이다: 읽기 전용 명령은
+///   accounts.json을 고치지 않는다는 기존 정책이 우선이고, 다음 변경 명령이나 앱 실행이 채운다.
 func makeContext(healProviders: Bool = false) throws -> (
     env: MobiusEnvironment, store: AccountStore,
     io: ClaudeConfigIO, codexIO: CodexConfigIO, switcher: Switcher) {
@@ -105,9 +108,14 @@ struct Switch: ParsableCommand {
             // 같은 풀 안의 중복 — 같은 이메일의 다른 조직을 같은 이름으로 capture한 경우.
             let orgs = matches.map { $0.organizationLabel.isEmpty ? $0.tierDescription : $0.organizationLabel }
                 .joined(separator: ", ")
+            // ★ 안내가 회복 경로까지 말해야 한다(리뷰 지적) — 중복 닉네임은 `switch`로 고를 수
+            //   없으므로 "그 계정으로 로그인"을 `mobius switch`로는 할 수 없다. 그래서 claude에서
+            //   직접 로그인하는 경로를 명시한다. (구버전에서 이메일 앞부분만으로 adopt된
+            //   `leo@a.com`·`leo@b.com`이 둘 다 `leo`가 된 사용자가 실제로 이 상태다.)
             throw ValidationError(
                 "'\(name)' 닉네임의 계정이 같은 프로바이더에 여러 개입니다 (\(orgs)). "
-                + "그 계정으로 로그인한 뒤 `mobius capture <다른 닉네임>`으로 이름을 바꾸세요.")
+                + "`claude`에서 그 계정으로 직접 로그인한 뒤 "
+                + "`mobius capture <다른 닉네임>`으로 이름을 바꾸세요.")
         }
         try ctx.switcher.switchTo(target.id)
         // 사용자의 의지로 전환 — 앱 onTick의 primary 자동 복귀 대상이 아니다

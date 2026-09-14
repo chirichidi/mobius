@@ -73,6 +73,15 @@ public final class Switcher: @unchecked Sendable {
     /// 거기서 채운다 — 라이브를 보지 않으니 지금 어느 조직으로 로그인했든 오귀속되지 않는다.
     /// 비밀 **파일이 있는** 계정만 읽는다(stat 게이트) — 구버전 Keychain 폴백(승인창)은 타지 않는다.
     /// 반환: 채워 넣은 프로필 id. 앱 시작·CLI 변경 명령에서 heal 직후 1회 호출.
+    ///
+    /// ★ 조직 UUID만 채우면 **라벨과 토큰이 어긋난 채로 굳는다**(리뷰 지적). 이 버그를 이미
+    ///   맞은 프로필은 v0.5.3의 되저장이 이메일로 맞춰 **비밀만** 덮어쓴 결과라, "라벨은
+    ///   Acme Team인데 저장 스냅샷 토큰은 개인 Max"일 수 있다. 거기에 개인 Max의 UUID만 찍으면
+    ///   카드는 계속 회사 조직을 말하면서 실제로는 개인 계정이 된다 — 데이터는 안 잃지만
+    ///   사용자가 영영 오해한다. 스냅샷이 그 프로필의 자격증명 진실이므로 같은 identity에서
+    ///   이름과 등급도 함께 맞춘다. 다만 **빈 값으로는 덮어쓰지 않는다** — 구버전 스냅샷의
+    ///   oauthAccount는 organizationName이 없을 수 있고, 그때 멀쩡한 표시를 지우면 어긋남은
+    ///   안 줄고 정보만 사라진다.
     @discardableResult
     public func backfillOrganizationUUIDs() throws -> [UUID] {
         var filled: [UUID] = []
@@ -84,7 +93,11 @@ public final class Switcher: @unchecked Sendable {
                   let identity = ClaudeConfigIO.identity(fromSnapshot: snap),
                   !identity.organizationUuid.isEmpty
             else { continue }
-            try store.update(account.id) { $0.organizationUuid = identity.organizationUuid }
+            try store.update(account.id) {
+                $0.organizationUuid = identity.organizationUuid
+                if !identity.organizationName.isEmpty { $0.organizationName = identity.organizationName }
+                if !identity.tierDescription.isEmpty { $0.tierDescription = identity.tierDescription }
+            }
             filled.append(account.id)
         }
         return filled

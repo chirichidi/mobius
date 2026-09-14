@@ -973,9 +973,14 @@ final class AppState: ObservableObject {
     private func usageQueryBlob(for accountID: UUID) -> Data? {
         // ★ 순서 주의(실패 기록 3b): **값싼 이메일 확인을 먼저.** readLiveSnapshot은
         //   security CLI 서브프로세스라, 불일치로 버릴 결과를 먼저 읽으면 그 비용만 버린다.
+        // ★ 대조는 **`firstIndex(provider:matching:)` 한 곳**으로 한다(리뷰 지적). 여기서
+        //   `matches`를 직접 쓰면 관대한 쪽 규칙이 되어, 조직 미상 프로필이 아직 활성 마커를
+        //   쥐고 있는 동안 라이브가 이미 다른 조직으로 바뀌어 있어도 통과한다 — 그러면 org-A
+        //   토큰으로 조회한 사용량이 그 프로필에 기록된다(바로 이 주석이 말하는 오귀인).
         if store.file.activeAccountID == accountID,
-           let profile = store.file.accounts.first(where: { $0.id == accountID }),
-           let liveKey = try? io.liveAccountKey(), liveKey.matches(profile.key),
+           let idx = store.file.accounts.firstIndex(where: { $0.id == accountID }),
+           let liveKey = try? io.liveAccountKey(),
+           store.file.firstIndex(provider: io.provider, matching: liveKey) == idx,
            let live = try? io.readLiveSnapshot() {
             return live.keychainBlob
         }

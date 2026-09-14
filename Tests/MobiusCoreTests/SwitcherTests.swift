@@ -159,6 +159,56 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(store.file.accounts.first { $0.id == personal.id }?.organizationUuid, "")
     }
 
+    /// backfill은 조직 UUID만이 아니라 **이름·등급까지** 스냅샷 기준으로 맞춘다. 이 버그를 이미
+    /// 맞은 프로필은 되저장이 비밀만 덮어쓴 탓에 라벨과 토큰이 어긋나 있을 수 있고, UUID만 찍으면
+    /// "카드는 회사 조직인데 실제로는 개인 계정"인 상태가 그대로 굳는다.
+    func testBackfillAlsoRealignsLabelsWithStoredSnapshot() throws {
+        let oauth = #"{"emailAddress":"m@x.com","organizationName":"m@x.com's Organization","organizationUuid":"org-personal","organizationRateLimitTier":"default_claude_max_20x"}"#
+        let snapshot = CredentialsSnapshot(
+            keychainBlob: Data(#"{"tok":"P0"}"#.utf8),
+            credentialsFileData: Data(#"{"tok":"P0"}"#.utf8),
+            oauthAccountJSON: Data(oauth.utf8))
+        let mislabeled = try store.upsertProfile(nickname: "mislabeled", snapshot: snapshot)
+        // 구버전 되저장이 남긴 상태: 라벨은 회사 조직을 가리키는데 저장 토큰은 개인 Max의 것
+        try store.update(mislabeled.id) {
+            $0.organizationUuid = ""
+            $0.organizationName = "Acme Team"
+            $0.tierDescription = "Team"
+        }
+
+        XCTAssertEqual(try switcher.backfillOrganizationUUIDs(), [mislabeled.id])
+
+        let healed = store.file.accounts.first { $0.id == mislabeled.id }
+        XCTAssertEqual(healed?.organizationUuid, "org-personal")
+        XCTAssertEqual(healed?.organizationName, "m@x.com's Organization")
+        XCTAssertEqual(healed?.tierDescription, "Max 20X")
+        XCTAssertEqual(healed?.organizationLabel, "",
+                       "개인 구독의 자동 생성 조직 이름은 카드에 안 띄운다")
+    }
+
+    /// 스냅샷이 이름·등급을 모르면 **덮어쓰지 않는다** — 구버전 oauthAccount에는 organizationName이
+    /// 없을 수 있고, 그때 빈 값으로 밀면 어긋남은 안 줄고 멀쩡한 표시만 사라진다.
+    func testBackfillKeepsExistingLabelsWhenSnapshotHasNone() throws {
+        let oauth = #"{"emailAddress":"q@x.com","organizationUuid":"org-q"}"#
+        let snapshot = CredentialsSnapshot(
+            keychainBlob: Data(#"{"tok":"Q0"}"#.utf8),
+            credentialsFileData: Data(#"{"tok":"Q0"}"#.utf8),
+            oauthAccountJSON: Data(oauth.utf8))
+        let sparse = try store.upsertProfile(nickname: "sparse", snapshot: snapshot)
+        try store.update(sparse.id) {
+            $0.organizationUuid = ""
+            $0.organizationName = "Acme Team"
+            $0.tierDescription = "Team"
+        }
+
+        XCTAssertEqual(try switcher.backfillOrganizationUUIDs(), [sparse.id])
+
+        let healed = store.file.accounts.first { $0.id == sparse.id }
+        XCTAssertEqual(healed?.organizationUuid, "org-q")
+        XCTAssertEqual(healed?.organizationName, "Acme Team")
+        XCTAssertEqual(healed?.tierDescription, "Team")
+    }
+
     // MARK: refreshActiveSnapshotIfStable — 신선도 계약(반환값)
     // 호출자는 true를 "저장 secret이 이번 사이클 기준 신선"으로 읽고 라이브 재읽기를 생략한다.
     // 따라서 세 경로(가드 실패 / 성공 / 저장 throw)가 각각 정직하게 보고되는지 못 박는다.

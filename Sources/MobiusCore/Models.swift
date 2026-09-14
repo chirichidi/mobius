@@ -369,6 +369,14 @@ public struct AccountsFile: Codable, Equatable, Sendable {
     /// key와 같은 계정의 인덱스. **조직까지 정확히 맞는 프로필을 먼저** 찾고, 없으면 조직을 모르는
     /// 쪽(구버전 프로필, 또는 조직 없는 key)만 이메일로 맞춘다 — 같은 이메일에 조직 A·B 프로필이
     /// 둘 다 있을 때 A의 열쇠가 B를 잡는 일이 없어야 한다. 계정이 없으면 nil.
+    ///
+    /// ★ **이메일 폴백에서 후보가 둘 이상이면 nil이다.** 조직을 모르는 열쇠와 이메일이 같은
+    ///   프로필이 여럿인 상태는 이 변경 이후에 처음 생긴다(그전엔 이메일당 하나였다). 그때
+    ///   배열 순서로 아무거나 잡으면 `resaveLiveIntoMatchingProfile`·`reconcile`이 **남의 조직
+    ///   토큰을 그 프로필에 저장하고 setActive까지** 한다 — 이 저장소에서 가장 비싼 실패
+    ///   클래스(실패 기록 1·13)와 같은 모양이다. 잘못된 기록보다 미룬 판정이 낫다(실패 기록 21):
+    ///   소비자는 nil을 받으면 아무것도 안 하고 다음 틱에 다시 본다. 폴백이 더 자주 나는 것뿐
+    ///   손해가 없는 방향이다.
     public func firstIndex(provider: Provider, matching key: AccountKey) -> Int? {
         let sameEmail = accounts.indices.filter {
             accounts[$0].provider == provider && accounts[$0].emailAddress == key.emailAddress
@@ -377,7 +385,9 @@ public struct AccountsFile: Codable, Equatable, Sendable {
            let exact = sameEmail.first(where: { accounts[$0].organizationUuid == key.organizationUuid }) {
             return exact
         }
-        return sameEmail.first { accounts[$0].key.matches(key) }
+        // 여기부터는 한쪽이 조직을 모르는 이메일 폴백이다 — 모호하면 손대지 않는다.
+        let loose = sameEmail.filter { accounts[$0].key.matches(key) }
+        return loose.count == 1 ? loose.first : nil
     }
 
     public func firstAccount(provider: Provider, matching key: AccountKey) -> AccountProfile? {
