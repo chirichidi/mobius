@@ -35,7 +35,7 @@ final class AccountStoreTests: XCTestCase {
         XCTAssertEqual(try store.secret(for: p1.id)?.keychainBlob, Data("blob-p@x.com-".utf8))
     }
 
-    // MARK: 계정 열쇠 = 이메일 + 조직 (실패 기록 22)
+    // MARK: 계정 열쇠 = 이메일 + 조직 (실패 기록 23)
 
     /// 같은 이메일이라도 조직이 다르면 **별개 프로필**이다 — 회사 Team과 개인 Max를 한 이메일로
     /// 쓰는 사용자의 두 번째 로그인이 첫 프로필(과 그 토큰)을 덮어쓰면 안 된다.

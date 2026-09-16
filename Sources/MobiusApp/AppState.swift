@@ -260,7 +260,7 @@ final class AppState: ObservableObject {
             initError = initError.map { "\($0)\n\(warn)" } ?? warn
         }
         // 구버전 프로필(조직 미상)에 저장 스냅샷의 organizationUuid를 채운다 — 같은 이메일의 다른
-        // 조직으로 로그인했을 때 이 프로필이 이메일만으로 잡혀 덮어써지지 않게(실패 기록 22).
+        // 조직으로 로그인했을 때 이 프로필이 이메일만으로 잡혀 덮어써지지 않게(실패 기록 23).
         // 비밀 파일이 있는 계정만 읽으므로 Keychain 승인창은 뜨지 않는다.
         _ = try? switcher.backfillOrganizationUUIDs()
         self.file = store.file

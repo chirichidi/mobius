@@ -57,7 +57,7 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
 - **계정의 정체 = (emailAddress, organizationUuid)** — `oauthAccount.organizationUuid`. 한 이메일이
   여러 조직(개인 Max + 회사 Team + 회사 Enterprise)에 **동시에** 속한다(실측 2026-09-11: 계정 메뉴에
   워크스페이스 3개, UUID 각각 다름). 이메일만으로 대조하면 두 번째 조직 로그인이 첫 프로필을
-  덮어쓴다(실패 기록 22). `organizationName`은 표시용일 뿐이고 개인 구독은
+  덮어쓴다(실패 기록 23). `organizationName`은 표시용일 뿐이고 개인 구독은
   `"<이메일>'s Organization"`으로 자동 생성된다(`organizationType`: `claude_max` / `claude_team` /
   `claude_enterprise`). 코드는 `AccountKey`, 대조는 `AccountsFile.firstIndex(provider:matching:)`.
 - **전환 = 3곳 스왑**: Keychain + .credentials.json + ~/.claude.json 의 oauthAccount.
@@ -588,7 +588,7 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     사용자에게 거짓말이 된다(`notifyModelLimitedOnly`, `SwitchReason.modelExhausted`).
     (3) 개발 Mac 세션 로그 한 달치에 창 소진 이벤트가 **0건**이었다 — 자체 발견이 사실상
     불가능한, 규모가 조건인 버그(13·17·20과 같은 클래스). 외부 제보가 유일한 발견 경로다.
-22. **계정 정체를 이메일 하나로 잡아 같은 이메일의 다른 조직이 프로필을 덮어씀 (외부 제보, 2026-09-11)** —
+23. **계정 정체를 이메일 하나로 잡아 같은 이메일의 다른 조직이 프로필을 덮어씀 (외부 제보, 2026-09-11)** —
     프로필 대조 8곳(`AccountStore.upsertProfile`, `Switcher`의 resave/refresh/adopt/reconcile,
     `LoginFlow`의 닉네임 재사용·재로그인 판정, `AppState.usageQueryBlob`)이 전부
     `(provider, emailAddress)`만 봤다. claude.ai는 **한 이메일이 여러 조직**(개인 Max + 회사 Team +

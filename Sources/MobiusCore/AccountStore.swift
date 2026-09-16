@@ -63,7 +63,7 @@ public final class AccountStore: @unchecked Sendable {
     // MARK: 프로필
 
     /// (provider, 계정 열쇠)로 기존 프로필을 찾아 갱신하거나 새로 만든다. 열쇠는 이메일 + 조직이다 —
-    /// 같은 이메일이라도 조직이 다르면 **다른 프로필**이 된다(`AccountKey`, 실패 기록 22).
+    /// 같은 이메일이라도 조직이 다르면 **다른 프로필**이 된다(`AccountKey`, 실패 기록 23).
     /// 그 프로바이더의 첫 계정은 자동 활성.
     @discardableResult
     public func upsertProfile(nickname: String, provider: Provider,

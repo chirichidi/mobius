@@ -35,7 +35,7 @@ func makeContext(healProviders: Bool = false) throws -> (
             }
         }
         // 구버전 프로필(조직 미상)에 저장 스냅샷의 organizationUuid를 채운다 — 같은 이메일의 다른
-        // 조직 로그인이 이 프로필을 덮어쓰지 않게(실패 기록 22). 비밀 파일이 있는 계정만 읽으므로
+        // 조직 로그인이 이 프로필을 덮어쓰지 않게(실패 기록 23). 비밀 파일이 있는 계정만 읽으므로
         // 승인창은 뜨지 않는다.
         _ = try? switcher.backfillOrganizationUUIDs()
     }

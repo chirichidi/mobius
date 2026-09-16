@@ -56,7 +56,7 @@ final class LoginFlowController: NSObject, ASWebAuthenticationPresentationContex
                snap.keychainBlob != previous?.keychainBlob {
                 session?.cancel(); session = nil   // 창 닫기
 
-                // 같은 이메일이라도 조직이 다르면 다른 계정이다(AccountKey, 실패 기록 22) — 회사 Team과
+                // 같은 이메일이라도 조직이 다르면 다른 계정이다(AccountKey, 실패 기록 23) — 회사 Team과
                 // 개인 Max를 한 이메일로 쓰는 사용자의 두 번째 로그인이 첫 프로필을 덮어쓰면 안 된다.
                 let identity = ClaudeConfigIO.identity(fromSnapshot: snap)
                     ?? ProviderIdentity(emailAddress: email, organizationName: "", tierDescription: "")
@@ -66,12 +66,7 @@ final class LoginFlowController: NSObject, ASWebAuthenticationPresentationContex
 
                 // ★ `matches`가 아니라 **정확 비교**다 — 관대한 대조로 바꾸면 같은 이메일의 다른
                 //   조직 로그인이 "재로그인"으로 보여 이 변경이 고치는 버그가 그대로 돌아온다.
-                //   다만 기준선이 조직을 모르는 경우(옛 claude.json)는 예외로 둔다: 로그인 뒤에만
-                //   조직이 생기면 같은 계정 재로그인도 "새 계정 추가"로 보고돼 문구가 거짓말을 하고,
-                //   원래 스냅샷을 되쓰는 경로까지 탄다(다음 전환에서 자연 해소되지만 불필요하다).
                 let sameAccount = identity.key == baselineKey
-                    || (baselineKey.map { $0.organizationUuid.isEmpty
-                                          && $0.emailAddress == identity.emailAddress } ?? false)
                 if sameAccount {
                     MobiusNotification.postAccountsChanged()
                     return .refreshed(profile)

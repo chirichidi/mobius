@@ -1,7 +1,7 @@
 import XCTest
 @testable import MobiusCore
 
-/// 계정 열쇠(이메일 + 조직) 대조 규칙 — 실패 기록 22.
+/// 계정 열쇠(이메일 + 조직) 대조 규칙 — 실패 기록 23.
 /// 한 이메일이 여러 조직(개인 Max·회사 Team·Enterprise)에 속할 수 있으므로 이메일만으로는
 /// 계정을 구분할 수 없다. 조직을 모르는 쪽(구버전 프로필·Codex)은 이메일만으로 맞춰 예전 동작을 지킨다.
 final class AccountKeyTests: XCTestCase {

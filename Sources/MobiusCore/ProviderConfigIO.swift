@@ -38,7 +38,7 @@ public protocol ProviderConfigIO: Sendable {
 
     /// 계정 열쇠(이메일 + 조직). `liveEmail`과 같은 값싼 경로여야 한다. 조직 개념이 없는
     /// 프로바이더는 기본 구현(이메일만)으로 충분하다. **프로필 대조는 이메일이 아니라 이 값으로**
-    /// 한다 — 한 이메일이 여러 조직에 속할 수 있다(실패 기록 22).
+    /// 한다 — 한 이메일이 여러 조직에 속할 수 있다(실패 기록 23).
     func liveAccountKey() throws -> AccountKey?
 
     /// 표시용 메타데이터를 포함한 신원 (등록/adopt 시). 로그아웃 상태면 nil.

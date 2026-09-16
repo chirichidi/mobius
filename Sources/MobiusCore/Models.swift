@@ -72,7 +72,7 @@ public struct AdvisoryRecord: Codable, Equatable, Sendable {
 
 /// 한 프로바이더 안에서 계정을 구분하는 열쇠 — 이메일 **과 조직**.
 ///
-/// 이메일 하나로는 부족하다(실패 기록 22): Claude는 한 이메일이 여러 조직(개인 Max·회사 Team·
+/// 이메일 하나로는 부족하다(실패 기록 23): Claude는 한 이메일이 여러 조직(개인 Max·회사 Team·
 /// 회사 Enterprise)에 동시에 속할 수 있고, 조직마다 자격증명·한도·약관이 따로다. `~/.claude.json`의
 /// `oauthAccount.organizationUuid`가 그 조직을 가리킨다.
 /// `organizationUuid`가 빈 문자열이면 "조직을 모른다"는 뜻이다 — 조직 개념이 없는 프로바이더(Codex),

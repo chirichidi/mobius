@@ -86,7 +86,7 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(store.file.activeAccountID, personal.id) // 그대로
     }
 
-    // MARK: 계정 열쇠 = 이메일 + 조직 (실패 기록 22)
+    // MARK: 계정 열쇠 = 이메일 + 조직 (실패 기록 23)
     // 한 이메일이 개인 Max·회사 Team·회사 Enterprise에 동시에 속한다. 이메일만으로 대조하면
     // 두 번째 조직으로 로그인한 순간 첫 프로필이 그 조직의 토큰으로 덮어써진다.
 
