@@ -128,6 +128,30 @@ public enum HitAttribution {
     ///   이 창이 지난 뒤의 hit에서 정상적으로 기록된다(최대 이만큼 늦어질 뿐).
     public static let modelScopeTrustWindow: TimeInterval = 300
 
+    /// 검증을 못 한 로그 hit을 그대로 기록하는 최후 폴백(`AppState.giveUpVerification`)을 써도
+    /// 되는가 — 마지막 활성 계정 변경 뒤 `modelScopeTrustWindow`가 지났을 때만. 오귀인은 전환
+    /// 직후에만 생기므로 그 구간만 피하면 로그 귀속은 사실상 옳다(실패 기록 21).
+    public static func logFallbackAllowed(lastActiveChangeAt: Date, now: Date) -> Bool {
+        now.timeIntervalSince(lastActiveChangeAt) > modelScopeTrustWindow
+    }
+
+    /// 사용량 조회가 요청 제한(429) 중인 보류 트리거를 수명(`ttl`)이 차기 전에 최후 폴백으로
+    /// 넘길까(실패 기록 25).
+    ///
+    /// 다시 조회할 수 있는 시각(`retryAt`)이 트리거의 수명 끝(`firstSeenAt + ttl`) 이후면, 기다려도
+    /// 이 트리거로는 한 번도 조회하지 못하고 수명이 다해 최후 폴백으로 끝난다. 그 결과를 수명 끝까지
+    /// 미루면 자동 전환만 그만큼 늦어진다 — claude도 한도에 닿을 때 이 엔드포인트를 불러서, 429는
+    /// 활성 계정이 막힌 바로 그 순간에 몰리기 쉽다.
+    /// ★ 단 **최근 전환이 없을 때만** 앞당긴다. 최후 폴백은 전환 직후면 아무것도 기록하지 않고
+    ///   트리거를 버리므로, 그때 앞당기면 수명 끝에서는 기록됐을 hit이 사라진다. 그 경우는 예전처럼
+    ///   수명 끝까지 기다린다.
+    public static func givesUpEarlyWhileRateLimited(retryAt: Date, firstSeenAt: Date,
+                                                    ttl: TimeInterval, lastActiveChangeAt: Date,
+                                                    now: Date) -> Bool {
+        retryAt >= firstSeenAt.addingTimeInterval(ttl)
+            && logFallbackAllowed(lastActiveChangeAt: lastActiveChangeAt, now: now)
+    }
+
     /// **계정 창(5시간/주간)을 먼저 본다.** 계정 자체가 소진이면 그걸로 기록한다.
     ///
     /// 계정 창은 여유인데 **모델 전용 한도**(`weekly_scoped`, 예: Fable)가 100%면 그것도

@@ -43,8 +43,24 @@ public struct UsageRateLimitBackoff: Equatable, Sendable {
         retryAt[id] = until
     }
 
-    /// 조회가 성공했다 — 제한 기록을 지운다.
+    /// 다시 조회할 때까지 남은 **분** — 올림하고 최소 1이다. 카드 캡션("N분 후 다시 조회")이 쓴다.
+    /// 내림이면 1분 미만일 때 "0분 후"가 되는데, 카드 리스트의 현재 시각이 30초마다 바뀌어 실제로
+    /// 보인다(리뷰 지적).
+    public static func minutesUntilRetry(_ retryAt: Date, now: Date) -> Int {
+        max(1, Int((retryAt.timeIntervalSince(now) / 60).rounded(.up)))
+    }
+
+    /// 대기 시각이 지났더라도 이 계정의 기록이 남아 있는가(`recordSuccess`로 지울 것이 있는가).
+    public func hasRecord(_ id: UUID) -> Bool {
+        retryAt[id] != nil
+    }
+
+    /// 조회가 성공했다 — 제한 기록을 지운다. 기록이 없으면 아무것도 바꾸지 않는다.
+    /// ★ 앱은 이 값을 `@Published`로 들고 있어서, 변경 메서드를 **부르는 것만으로** 화면 갱신
+    ///   신호가 나간다(프로퍼티 래퍼의 setter가 불린다). 여기 guard만으로는 그 신호를 막지 못하므로
+    ///   호출자는 `hasRecord`로 먼저 확인한다.
     public mutating func recordSuccess(_ id: UUID) {
+        guard retryAt[id] != nil else { return }
         retryAt[id] = nil
     }
 }

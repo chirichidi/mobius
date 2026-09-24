@@ -47,4 +47,27 @@ final class UsageRateLimitBackoffTests: XCTestCase {
         backoff.recordSuccess(a)
         XCTAssertFalse(backoff.isBlocked(a, now: now))
     }
+
+    /// 기록이 없는 계정의 성공은 아무것도 바꾸지 않고, 호출자는 `hasRecord`로 미리 알 수 있다.
+    /// (앱은 이 값을 `@Published`로 들고 있어 변경 메서드를 부르기만 해도 화면 갱신 신호가 나간다.)
+    func testSuccessWithoutRecordIsNoOp() {
+        var backoff = UsageRateLimitBackoff()
+        XCTAssertFalse(backoff.hasRecord(a))
+        backoff.recordSuccess(a)
+        XCTAssertEqual(backoff, UsageRateLimitBackoff())
+
+        backoff.recordRateLimited(a, retryAfter: 60, now: now)
+        XCTAssertTrue(backoff.hasRecord(a))
+        XCTAssertTrue(backoff.hasRecord(a) && !backoff.isBlocked(a, now: now.addingTimeInterval(120)),
+                      "대기 시각이 지나도 성공으로 지우기 전까지 기록은 남는다")
+    }
+
+    /// 카드 캡션의 남은 시간은 올림한다 — 내림이면 1분 미만일 때 "0분 후"가 된다.
+    func testMinutesUntilRetryRoundsUp() {
+        XCTAssertEqual(UsageRateLimitBackoff.minutesUntilRetry(now.addingTimeInterval(20), now: now), 1)
+        XCTAssertEqual(UsageRateLimitBackoff.minutesUntilRetry(now.addingTimeInterval(60), now: now), 1)
+        XCTAssertEqual(UsageRateLimitBackoff.minutesUntilRetry(now.addingTimeInterval(61), now: now), 2)
+        XCTAssertEqual(UsageRateLimitBackoff.minutesUntilRetry(now.addingTimeInterval(3599), now: now), 60)
+        XCTAssertEqual(UsageRateLimitBackoff.minutesUntilRetry(now.addingTimeInterval(3600), now: now), 60)
+    }
 }

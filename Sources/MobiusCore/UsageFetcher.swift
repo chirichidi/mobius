@@ -123,6 +123,39 @@ public enum UsageFetcherError: Error, Equatable {
     case rateLimited(retryAfter: TimeInterval?)
 }
 
+/// 사용량 조회 한 번의 결과(실패 기록 25). 앱의 조회는 모두 `UsageFetcher.fetchOutcome`을 거친다.
+///
+/// 결과의 **종류**를 값으로 돌려주는 이유: 예전 호출자는 스냅샷이 nil이면 "방금 429였나"를
+/// 대기 표(`UsageRateLimitBackoff.isBlocked`)를 다시 읽어 거꾸로 추측했다. 그 추측은 대기 하한
+/// (`minWait`)이 충분히 길고 다른 경로가 기록을 지우지 않는다는 가정에 기대므로, 가정이 깨지면
+/// 조용히 틀어진다(리뷰 지적).
+public enum UsageFetchOutcome: Equatable, Sendable {
+    /// 200 — 스냅샷을 얻었다.
+    case ok(UsageSnapshot)
+    /// 429 — 이 토큰의 조회가 요청 제한에 걸렸다. `retryAfter`는 `Retry-After`(초), 없으면 nil.
+    case rateLimited(retryAfter: TimeInterval?)
+    /// 401/403 — 토큰이 거부됐다. 재인증 판정은 호출자가 자기 조건으로 한다.
+    case unauthorized
+    /// 그 밖의 실패 — 네트워크 오류·타임아웃·5xx·응답 해석 실패·토큰 없음.
+    case failed
+
+    public var snapshot: UsageSnapshot? {
+        if case .ok(let snap) = self { return snap }
+        return nil
+    }
+
+    /// 임계값 폴의 서킷 브레이커(`UsagePollBreaker`)가 이 결과를 연속 실패로 세는가.
+    /// 429는 세지 않는다 — 브레이커는 네트워크 이상을 위한 것이고, 제한은 서버가 준 시각에
+    /// 스스로 풀린다. 401/403은 이 결과값을 도입하기 전과 같이 센다(예전엔 `try?`가 nil로 바꿔
+    /// 다른 실패와 함께 셌다).
+    public var countsAsPollFailure: Bool {
+        switch self {
+        case .ok, .rateLimited: return false
+        case .unauthorized, .failed: return true
+        }
+    }
+}
+
 /// Claude OAuth usage 엔드포인트 조회. 사용자가 게이지 표시를 켰을 때만,
 /// 팝오버를 열 때 저빈도(캐시 만료 시)로만 호출된다 — 상시 폴링 없음.
 public enum UsageFetcher {
@@ -233,6 +266,23 @@ public enum UsageFetcher {
         return UsageSnapshot(fiveHourPercent: fivePct, fiveHourResetsAt: fiveReset,
                              sevenDayPercent: weekPct, sevenDayResetsAt: weekReset,
                              scopedLimits: scoped.isEmpty ? nil : scoped, fetchedAt: now)
+    }
+
+    /// `fetch`의 결과를 종류별 값으로 돌려준다 — 던지지 않는다(`UsageFetchOutcome` 참조).
+    public static func fetchOutcome(keychainBlob: Data,
+                                    transport: Transport = defaultTransport) async -> UsageFetchOutcome {
+        do {
+            guard let snap = try await fetch(keychainBlob: keychainBlob, transport: transport) else {
+                return .failed
+            }
+            return .ok(snap)
+        } catch UsageFetcherError.rateLimited(let retryAfter) {
+            return .rateLimited(retryAfter: retryAfter)
+        } catch UsageFetcherError.unauthorized {
+            return .unauthorized
+        } catch {
+            return .failed
+        }
     }
 
     public static func fetch(keychainBlob: Data,

@@ -201,13 +201,23 @@ struct AccountCardView: View {
 
     /// 게이지 아래 캡션 — 기준 시각(오래됐을 때만)과 요청 제한 사유(제한 중일 때만)를 잇는다.
     private func staleCaption(_ stale: String?) -> String? {
-        let retry = usageRetryAt.flatMap { $0 > now ? remainText(until: $0) : nil }
+        let retry = usageRetryAt.flatMap { $0 > now ? retryRemainText(until: $0) : nil }
         switch (stale, retry) {
         case let (stale?, retry?): return loc("%@ 값 · 조회 제한 중, %@ 다시 조회", stale, retry)
         case let (nil, retry?): return loc("조회 제한 중, %@ 다시 조회", retry)
         case let (stale?, nil): return loc("%@ 값", stale)
         case (nil, nil): return nil
         }
+    }
+
+    /// 다시 조회할 때까지 남은 시간. `remainText`와 같은 문구지만 분을 **올림**한다
+    /// (`UsageRateLimitBackoff.minutesUntilRetry` 참조).
+    private func retryRemainText(until date: Date) -> String {
+        let mins = UsageRateLimitBackoff.minutesUntilRetry(date, now: now)
+        let (d, h, m) = (mins / 1440, (mins % 1440) / 60, mins % 60)
+        if d > 0 { return loc("%d일 %d시간 후", d, h) }
+        if h > 0 { return loc("%d시간 %d분 후", h, m) }
+        return loc("%d분 후", m)
     }
 
     private func gauges(_ u: UsageSnapshot) -> some View {
