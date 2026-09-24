@@ -187,11 +187,13 @@ struct AccountCardView: View {
     /// 한도 줄 뒤에 붙는 조직·등급. 한도에 걸리면 이 줄이 카운트다운으로 바뀌는데, 그때 조직까지
     /// 사라지면 같은 이메일의 두 카드(회사 Team·개인 Max)가 닉네임 말고는 구분되지 않는다
     /// (실측 2026-09-24 — 둘 다 한도에 걸린 화면). 카운트다운은 `fixedSize`로 지키고 이쪽이 잘린다.
+    /// ★ 가운데를 자른다 — 끝을 자르면 `· acme-team · T…`처럼 **등급**이 먼저 사라지는데,
+    ///   같은 이메일의 두 카드를 가르는 데는 등급(Team·Max 20x)이 가장 짧고 확실한 단서다(실측 2026-09-24).
     @ViewBuilder private var subtitleTrailer: some View {
         if !profile.subtitle.isEmpty {
             Text("· \(profile.subtitle)")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
-                .lineLimit(1).truncationMode(.tail)
+                .lineLimit(1).truncationMode(.middle)
         }
     }
 
