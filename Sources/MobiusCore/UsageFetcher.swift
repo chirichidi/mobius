@@ -115,6 +115,12 @@ public enum UsageFetcherError: Error, Equatable {
     /// 401/403 — 토큰이 거부됨. 저장된 expiresAt이 아직 유효한데 이 에러면
     /// 진짜 재로그인 필요(토큰 폐기)로 판단할 수 있다 (만료 토큰의 401은 오탐).
     case unauthorized
+    /// 429 — 이 토큰의 사용량 조회가 요청 제한에 걸렸다. `retryAfter`는 응답의 `Retry-After`(초),
+    /// 없으면 nil. 토큰 문제가 아니므로 재인증 판정에 쓰지 않는다.
+    /// ★ 실측 2026-09-24: 같은 계정을 Mobius·ccstatusline·claude(`/usage`, 한도 도달 시 조회)가 함께
+    ///   부르다 `rate_limit_error`를 받았고, `Retry-After`는 3600초까지 왔다. 예전엔 200이 아니면
+    ///   조용히 nil이라 게이지가 한 시간 넘게 얼어붙은 채 팝오버를 열 때마다 다시 호출했다.
+    case rateLimited(retryAfter: TimeInterval?)
 }
 
 /// Claude OAuth usage 엔드포인트 조회. 사용자가 게이지 표시를 켰을 때만,
@@ -241,7 +247,24 @@ public enum UsageFetcher {
         if http.statusCode == 401 || http.statusCode == 403 {
             throw UsageFetcherError.unauthorized
         }
+        if http.statusCode == 429 {
+            throw UsageFetcherError.rateLimited(
+                retryAfter: retryAfterSeconds(http.value(forHTTPHeaderField: "Retry-After"), now: Date()))
+        }
         guard http.statusCode == 200 else { return nil }
         return parse(data)
+    }
+
+    /// `Retry-After` 헤더 → 기다릴 초. 정수 초와 HTTP 날짜(RFC 9110 IMF-fixdate) 둘 다 받는다.
+    /// 해석할 수 없거나 음수면 nil — 호출자가 기본 대기 시간을 쓴다.
+    static func retryAfterSeconds(_ header: String?, now: Date) -> TimeInterval? {
+        guard let raw = header?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        if let secs = TimeInterval(raw) { return secs >= 0 ? secs : nil }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "GMT")
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = f.date(from: raw) else { return nil }
+        return max(0, date.timeIntervalSince(now))
     }
 }

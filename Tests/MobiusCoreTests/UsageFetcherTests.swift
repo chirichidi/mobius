@@ -219,4 +219,59 @@ final class UsageFetcherTests: XCTestCase {
         var requests: [URLRequest] = []
         func record(_ req: URLRequest) { requests.append(req) }
     }
+
+    // MARK: 429 요청 제한 (실패 기록 25)
+
+    private func fetch(status: Int, headers: [String: String]? = nil) async throws -> UsageSnapshot? {
+        try await UsageFetcher.fetch(
+            keychainBlob: Data(#"{"claudeAiOauth":{"accessToken":"tok"}}"#.utf8),
+            transport: { _ in
+                (Data(#"{"error":{"type":"rate_limit_error"}}"#.utf8),
+                 HTTPURLResponse(url: UsageFetcher.endpoint, statusCode: status,
+                                 httpVersion: nil, headerFields: headers)!)
+            })
+    }
+
+    /// 예전엔 200이 아니면 조용히 nil이라, 제한 중에도 호출자가 매번 다시 불렀다.
+    func testRateLimitedIsDistinctErrorCarryingRetryAfter() async {
+        do {
+            _ = try await fetch(status: 429, headers: ["Retry-After": "3600"])
+            XCTFail("429는 rateLimited로 던져야 한다")
+        } catch {
+            XCTAssertEqual(error as? UsageFetcherError, .rateLimited(retryAfter: 3600))
+        }
+        do {
+            _ = try await fetch(status: 429)
+            XCTFail("429는 rateLimited로 던져야 한다")
+        } catch {
+            XCTAssertEqual(error as? UsageFetcherError, .rateLimited(retryAfter: nil), "헤더가 없으면 nil")
+        }
+    }
+
+    func testOtherStatusesKeepTheirMeaning() async throws {
+        do {
+            _ = try await fetch(status: 401)
+            XCTFail("401은 unauthorized")
+        } catch {
+            XCTAssertEqual(error as? UsageFetcherError, .unauthorized)
+        }
+        let serverError = try await fetch(status: 500)
+        XCTAssertNil(serverError, "5xx는 예전처럼 nil — 제한이 아니므로 대기 시각을 남기지 않는다")
+    }
+
+    func testRetryAfterParsesSecondsAndHTTPDate() {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        XCTAssertEqual(UsageFetcher.retryAfterSeconds("126", now: now), 126)
+        XCTAssertEqual(UsageFetcher.retryAfterSeconds(" 30 ", now: now), 30)
+        XCTAssertNil(UsageFetcher.retryAfterSeconds("-5", now: now))
+        XCTAssertNil(UsageFetcher.retryAfterSeconds("soon", now: now))
+        XCTAssertNil(UsageFetcher.retryAfterSeconds(nil, now: now))
+        // HTTP 날짜: now + 90초
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "GMT")
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        let header = f.string(from: now.addingTimeInterval(90))
+        XCTAssertEqual(UsageFetcher.retryAfterSeconds(header, now: now) ?? -1, 90, accuracy: 1)
+    }
 }

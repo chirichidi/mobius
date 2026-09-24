@@ -17,6 +17,9 @@ final class AppState: ObservableObject {
     private var lastErrorAt: Date?
     static let lastErrorTTL: TimeInterval = 5 * 60
     @Published private(set) var usage: [UUID: UsageSnapshot] = [:]
+    /// 사용량 엔드포인트 429의 계정별 대기 시각(실패 기록 25). 모든 조회 경로가 `fetchUsage`를 거쳐
+    /// 이 표를 채우고, 조회 전에 `isBlocked`를 본다. 카드는 여기서 "조회 제한 중" 문구를 얻는다.
+    @Published private(set) var usageBackoff = UsageRateLimitBackoff()
     // 수동 전환 낙관적 표시 — 클릭 즉시 이 계정을 활성으로 보여주고(스무스), 실제 refresh+스왑은
     // 백그라운드에서. 완료되면 nil로 정착(실제 activeAccountID가 인계).
     @Published private(set) var pendingSwitchID: UUID?
@@ -317,9 +320,12 @@ final class AppState: ObservableObject {
         // needsReauth 계정도 계속 조회한다 — CLI에서 직접 `claude auth login`으로 복구하는
         // 경우, 조회가 200이면 그 복구를 감지해 needsReauth를 자동으로 푼다(아래 성공 경로).
         // 여전히 401이면 `!profile.needsReauth` 가드가 재알림을 막으므로 스팸은 없다.
+        // 사용량 조회가 요청 제한(429) 중인 계정은 건너뛴다 — 팝오버를 열 때마다 제한 중인
+        // 엔드포인트를 다시 부르지 않는다(실패 기록 25). 만료 토큰 refresh도 함께 쉰다.
         let stale = store.file.accounts.filter {
             $0.provider == .claude &&
-            (usage[$0.id]?.fetchedAt ?? .distantPast) < now.addingTimeInterval(-usageStaleness)
+            (usage[$0.id]?.fetchedAt ?? .distantPast) < now.addingTimeInterval(-usageStaleness) &&
+            !usageBackoff.isBlocked($0.id, now: now)
         }
         guard !stale.isEmpty else { return }
         usageTask = Task { @MainActor in
@@ -377,7 +383,7 @@ final class AppState: ObservableObject {
                     }
                 }
                 do {
-                    guard let snap = try await UsageFetcher.fetch(keychainBlob: fetchBlob)
+                    guard let snap = try await fetchUsage(accountID: profile.id, keychainBlob: fetchBlob)
                     else { continue }
                     usage[profile.id] = snap
                     // 조회 성공 = 토큰 살아있음 → 잘못 남은 재로그인 마킹 자가 해제
@@ -398,7 +404,10 @@ final class AppState: ObservableObject {
                         }
                         reauthChanged = true // reload 유발용 (상태 변경 반영)
                     }
-                } catch is UsageFetcherError {
+                } catch UsageFetcherError.unauthorized {
+                    // ★ `catch is UsageFetcherError`로 넓히면 429(`rateLimited`)까지 인증 실패로 본다.
+                    //   429는 `fetchUsage`가 대기 시각으로 기록하고 nil로 돌려주므로 여기 오지 않지만,
+                    //   오류가 늘어도 인증 판정이 섞이지 않도록 이 갈래는 401/403만 받는다.
                     // 401/403 = 이 계정의 토큰이 거부됨. 계정별 토큰으로 조회하므로 오귀인 불가.
                     // 단 자연 만료 토큰의 401은 **활성/비활성 모두** 오탐이라 마킹하지 않는다 —
                     // 활성도 잠자기 등으로 claude가 안 돌면 라이브 토큰이 만료된 채 남는다
@@ -981,6 +990,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Claude 사용량 조회의 **단일 관문**(실패 기록 25). 모든 경로(팝오버·5분 폴링·한도 검증·후보
+    /// 확인)가 이 함수를 거친다. 429면 그 계정의 대기 시각을 기록하고 nil을 돌려주며, 성공하면
+    /// 기록을 지운다. 401/403(`unauthorized`)은 그대로 던진다 — 재인증 판정은 호출자 몫이다.
+    /// 호출자는 조회 **전에** `usageBackoff.isBlocked`를 봐서 제한 중인 계정을 부르지 않는다.
+    private func fetchUsage(accountID: UUID, keychainBlob: Data) async throws -> UsageSnapshot? {
+        do {
+            let snap = try await UsageFetcher.fetch(keychainBlob: keychainBlob)
+            if snap != nil { usageBackoff.recordSuccess(accountID) }
+            return snap
+        } catch UsageFetcherError.rateLimited(let retryAfter) {
+            usageBackoff.recordRateLimited(accountID, retryAfter: retryAfter, now: Date())
+            return nil
+        }
+    }
+
     /// usage 조회에 쓸 자격증명 blob. **활성 계정은 라이브 토큰**을 쓴다 — 저장 스냅샷은 앱
     /// 시작 직후 만료 토큰일 수 있다(claude CLI가 라이브를 갱신한다).
     ///
@@ -1171,11 +1195,14 @@ final class AppState: ObservableObject {
             //   막으면, 그 사이 진짜 소진이 나도 기록이 없어 자동 전환이 최대 10분 늦는다.
             snapshot = usage[accountID]
         case .fetchUsage:
-            if backingOff { return }            // 트리거는 남기고 조회만 쉰다
+            // 트리거는 남기고 조회만 쉰다. 사용량 조회가 요청 제한(429) 중이어도 같다 — 제한이
+            // 풀린 뒤 재시도 루프가 잇고, 끝내 판정이 안 서면 기존 최후 폴백(giveUpVerification)이 맡는다.
+            if backingOff || usageBackoff.isBlocked(accountID, now: now) { return }
             judgedByFetch = true
             lastHitVerifyAttempt[accountID] = now
             guard let blob = usageQueryBlob(for: accountID),
-                  let fetched = try? await UsageFetcher.fetch(keychainBlob: blob) else { return }
+                  let fetched = try? await fetchUsage(accountID: accountID, keychainBlob: blob)
+            else { return }
             usage[accountID] = fetched      // 게이지도 같이 신선해진다 (같은 계정의 같은 값)
             saveUsageCache()                // 다른 usage 갱신 지점과 동일하게 디스크에도 반영
             snapshot = fetched
@@ -1331,8 +1358,11 @@ final class AppState: ObservableObject {
         // 저장 secret으로 조회 — 방금 fresh sync됐으므로 라이브를 한 번 더 읽지 않는다.
         // 실패(네트워크/타임아웃/5xx 등)는 서킷 브레이커 카운터를 올린다. 3연속이면 위
         // 5분 블록이 다음부터 폴을 건너뛴다. 성공하면 0으로 리셋.
-        guard let snap = try? await UsageFetcher.fetch(keychainBlob: blob) else {
-            consecutiveUsagePollFailures += 1
+        // 사용량 조회가 요청 제한(429) 중이면 이번 폴은 쉰다. 서킷 브레이커 실패로도 세지 않는다 —
+        // 브레이커는 네트워크 이상을 위한 것이고, 제한은 서버가 준 시각에 스스로 풀린다(실패 기록 25).
+        guard !usageBackoff.isBlocked(active.id, now: now) else { return }
+        guard let snap = try? await fetchUsage(accountID: active.id, keychainBlob: blob) else {
+            if !usageBackoff.isBlocked(active.id, now: Date()) { consecutiveUsagePollFailures += 1 }
             return
         }
         consecutiveUsagePollFailures = 0
@@ -1404,6 +1434,9 @@ final class AppState: ObservableObject {
         let active = store.file.activeByProvider[.claude]
         for p in store.file.accounts where p.provider == .claude
             && p.id != active && !p.isLimited(now: now) && !p.needsReauth {
+            // 사용량 조회가 요청 제한(429) 중인 후보는 확인할 수 없다 — 건너뛴다. 만료 토큰 refresh로
+            // 승격하는 것도 함께 쉰다(조회를 못 할 거면 토큰을 회전시킬 이유가 없다).
+            if usageBackoff.isBlocked(p.id, now: now) { continue }
             guard let secret = try? store.secret(for: p.id) else { continue }
             var fetchBlob = secret.keychainBlob
             switch AutoSwitchEngine.candidateProbeAction(
@@ -1429,7 +1462,7 @@ final class AppState: ObservableObject {
                                // checker가 이미 마킹, 추가 알림 없이 스킵(stale sweep 전담)
                 }
             }
-            guard let snap = try? await UsageFetcher.fetch(keychainBlob: fetchBlob) else { continue }
+            guard let snap = try? await fetchUsage(accountID: p.id, keychainBlob: fetchBlob) else { continue }
             usage[p.id] = snap
             if (snap.fiveHourPercent ?? 0) < threshold { return p.id }   // 임계값 미만 = 검증된 후보
         }

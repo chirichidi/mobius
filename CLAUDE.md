@@ -41,6 +41,7 @@ Sources/MobiusCore/       앱·CLI 공유 코어 (전부 의존성 주입 → �
                            modelBlocked = 호출자가 usage 캐시로 계산한 "모델 창 소진" 계정 집합)
   UsageFetcher.swift       Claude usage 엔드포인트 조회 (게이지용, 팝오버 열 때만; Codex는 로그로 대체)
                            모델 스코프 주간 한도(weekly_scoped)도 파싱 → ScopedUsageLimit
+  UsageRateLimitBackoff.swift usage 엔드포인트 429의 계정별 대기 시각 (모든 조회 경로가 먼저 본다)
   SyncEngine.swift         멀티 Mac 동기화 (클라우드 폴더 미러, ★ 아래 '동기화 원칙')
   UpdateChecker.swift      GitHub 릴리스 업데이트 확인 (하루 1회)
 Sources/mobius/           CLI (list/switch/status/capture/auto)
@@ -74,6 +75,15 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
   (임계값 선제 알림용, 아래 QA 참조).
   **기본 꺼짐 — 끄면 폴링 0**(설정 게이트가 첫 검사라 요청 바이트 동일). 폴백 계정은 상시 폴링
   안 함(전환 후보 검증 때만, 그것도 저장 토큰 만료+쿨다운 경과 시에만 네트워크 refresh).
+- ★ **이 엔드포인트는 429 `rate_limit_error`를 준다**(실측 2026-09-24). 같은 계정을 부르는 모든
+  클라이언트가 한 제한을 나눠 쓴다 — Mobius, 상태줄 도구(예: ccstatusline, 3분 캐시), claude 자신
+  (`/usage`, 한도 도달 시 `?at_wall=1` 조회). `Retry-After`는 초 단위로 오고 3600초까지 관찰됐다.
+  제한 중에도 claude 터미널의 한도 표시는 실시간이다 — claude는 매 API 응답의
+  `anthropic-ratelimit-unified-*` 헤더로 값을 얻기 때문이다. 그래서 "Mobius 값이 터미널보다
+  한 시간 늦다"로 보인다. → 모든 조회가 `AppState.fetchUsage` 한 곳을 거치고, 429면
+  `UsageRateLimitBackoff`에 계정별 대기 시각(`Retry-After`, 없으면 5분, 30초~1시간으로 제한)을 남긴다.
+  팝오버·5분 폴링·한도 검증·후보 확인이 그 시각 전까지 그 계정을 부르지 않으며, 카드는 게이지
+  아래에 "조회 제한 중, N분 후 다시 조회"를 적는다(실패 기록 25).
 
 ### ★ OAuth 토큰 refresh (폴백 로그인 생사 판정 — claude 2.1.207 바이너리 실측)
 - `POST https://platform.claude.com/v1/oauth/token`, `Content-Type: application/json`,
@@ -665,6 +675,33 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     Max"인 프로필이 있을 수 있다. backfill이 같은 스냅샷에서 이름·등급도 맞춘다(빈 값으로는 덮어쓰지
     않는다 — 정보만 사라진다). 마이그레이션 한계는 README에 적었다: **이미 덮어써진 조직은 돌아오지
     않는다**(직전 것만 `.bak`에 남는다). backfill은 살아남은 프로필을 일관되게 만들 뿐이다.
+
+25. **usage 조회의 429를 "값 없음"으로 삼켜, 제한 중인 엔드포인트를 계속 부르며 한 시간 넘게 옛 값을
+    보여 줌 (실사용, 2026-09-24)** — 사용자가 "Mobius 값이 터미널에서 실시간으로 보이는 것보다 한 시간쯤
+    늦다"고 보고했다. 사용량 캐시(`usageCacheV1`)의 `fetchedAt`이 두 Claude 계정 모두 70분째 멈춰 있었고,
+    같은 요청을 한 번 보내 보니 `429 rate_limit_error`와 `Retry-After: 126`이 왔다. 같은 계정을 부르는
+    상태줄 도구(ccstatusline)도 11:23에 제한을 받아 한 시간 동안 호출을 멈춘 상태였다. 한편 claude의
+    터미널 한도 표시는 API 응답 헤더로 값을 얻어 이 제한과 무관하게 실시간이었다.
+    `UsageFetcher.fetch`는 200이 아니면 조용히 nil을 돌려줬고, 네 호출부(팝오버, 5분 폴링, 한도 검증,
+    후보 확인)는 모두 `try?`나 "nil이면 건너뛰기"라 429를 알 수 없었다. 그래서 팝오버를 열 때마다
+    (캐시 4분이 지난 계정마다) 제한 중인 엔드포인트를 다시 불렀고, 5분 폴링은 이것을 네트워크 실패로
+    세다 서킷 브레이커를 걸었다. 카드는 "N분 전 값"만 보여 이유를 알 수 없었다.
+    → `UsageFetcherError.rateLimited(retryAfter:)`를 따로 던지고(`Retry-After`는 초와 HTTP 날짜 둘 다
+    해석), 조회를 `AppState.fetchUsage` 한 관문으로 모아 계정별 대기 시각을 `UsageRateLimitBackoff`에
+    남긴다. 네 경로 모두 조회 **전에** 그 시각을 본다: 팝오버는 그 계정을 건너뛰고(만료 토큰 refresh도
+    함께 쉰다), 5분 폴링은 쉬되 서킷 브레이커 실패로 세지 않으며, 한도 검증은 트리거를 남긴 채 조회만
+    쉬고(끝내 판정이 안 서면 기존 최후 폴백), 후보 확인은 그 후보를 건너뛴다. 카드는 게이지 아래에
+    "조회 제한 중, N분 후 다시 조회"를 붙인다. 계정 단위인 이유는 제한이 토큰에 걸리기 때문이다 —
+    한 계정이 막혔다고 멀쩡한 폴백의 게이지와 후보 확인까지 멈추면 안 된다. 대기 시각은 인메모리라
+    앱을 다시 켜면 한 번 더 부른다(다시 429면 다시 기록된다).
+    ★ **다른 클라이언트의 User-Agent를 흉내 내 제한을 피하지 않는다.** 서비스가 건 제한을 우회하는
+    일이고, refresh 요청에 claude UA를 싣는 이유(형식 거부 회피, 실패 기록 14)와 성격이 다르다.
+    ★ `refreshUsageIfStale`의 인증 실패 분기는 `catch UsageFetcherError.unauthorized`로 좁혔다 —
+    `catch is UsageFetcherError`로 두면 오류 종류가 늘 때 429가 재인증 판정에 섞인다.
+    교훈: (1) 원격 호출의 실패를 한 가지 "nil"로 뭉치면, 기다려야 하는 실패(429)와 다시 해도 되는
+    실패(네트워크)를 가를 수 없어 호출자가 가장 나쁜 쪽(계속 재시도)을 택하게 된다. (2) 공유 자원의
+    제한은 우리 호출만 줄여서는 안 풀린다 — 같은 계정의 다른 클라이언트가 함께 쓴다. 우리가 할 일은
+    서버가 준 대기 시간을 지키고, 사용자에게 값이 멈춘 **이유**를 보여 주는 것이다.
 
 ## QA / 진행 상황
 
