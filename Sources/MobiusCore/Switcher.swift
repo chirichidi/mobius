@@ -26,6 +26,15 @@ public final class Switcher: @unchecked Sendable {
     let store: AccountStore
     let ios: [Provider: any ProviderConfigIO]
 
+    /// reconcile이 저장을 거부한 라이브의 신원 지문과 그 시각(프로바이더별). 같은 라이브면 비밀을 다시
+    /// 읽지 않는다 — 아래 `reconcile(provider:io:)` 참조.
+    private struct DeferredLive { let fingerprint: Data; let at: Date }
+    private var deferredLive: [Provider: DeferredLive] = [:]
+    private let deferredLiveLock = NSLock()
+    /// 거부한 라이브를 신원 지문이 그대로여도 다시 확인하는 간격. 토큰(Keychain) 쪽 변화는 값싸게 볼 수
+    /// 없어서, 신원은 그대로이고 토큰만 바뀐 경우를 따라가는 데 걸리는 시간의 상한이다.
+    public var deferredLiveRecheckInterval: TimeInterval = 5 * 60
+
     public init(env: MobiusEnvironment, keychain: KeychainClient,
                 store: AccountStore, io: ClaudeConfigIO,
                 extraIOs: [any ProviderConfigIO] = []) {
@@ -354,14 +363,30 @@ public final class Switcher: @unchecked Sendable {
             || (try? store.secretData(for: profile.id)) != nil
         if activeUnchanged && alreadyHasSecret { return } // 정상 상태 — 비밀 접근 없음
 
+        // ★ 직전에 저장을 거부한 라이브가 그대로면 비밀을 다시 읽지 않는다(리뷰 P2-1, 실패 기록 3·3b).
+        //   거부되는 상태(예: 옛 토큰을 캐시한 세션의 bootstrap이 신원만 되돌림)는 새 claude 세션이 다시
+        //   bootstrap할 때까지 이어질 수 있고, 그동안 15초마다 Keychain을 두 번 읽게 된다(`security`
+        //   subprocess, 파티션 리스트가 리셋된 환경이면 승인창). 신원 지문(파일 한 번 읽기)이 바뀌거나
+        //   간격(`deferredLiveRecheckInterval`)이 지나면 다시 본다. 로그인은 oauthAccount를 다시 쓰므로
+        //   곧바로 다시 보게 된다.
+        //   "라이브 이메일이 활성과 같으면 조기 반환"으로 막지 않는다 — 같은 이메일의 다른 조직으로 앱 밖에서
+        //   로그인한 경우를 reconcile이 따라가지 못하고, 5분 동기화도 종류가 다른 토큰은 보정하지 않는다.
+        let fingerprint = try? io.liveIdentityFingerprint()
+        if let fingerprint, isDeferredLive(provider, fingerprint: fingerprint) { return }
+
         // 실제 변화가 있을 때만(드묾) 비밀+이메일 두 번 읽어 일치 확인 후 저장. 열쇠를 한 번 더
         // 읽어 그 사이 같은 이메일의 다른 조직으로 바뀌지 않았는지도 확인한다(파일 읽기 한 번).
-        // ★ 토큰과 신원이 어긋났으면 활성도 옮기지 않는다 — 열쇠가 가리키는 프로필이 실제 로그인이
-        //   아니다. 이 경로가 "Max 토큰을 Team 프로필에 저장 + Team을 활성으로"를 만들던 자리다(실패 기록 24).
         guard let (live, stableEmail) = await io.readStableLiveSecretData(),
               stableEmail == key.emailAddress,
-              (try? io.liveAccountKey()) == key,
-              io.canStoreLiveSecret(live) else { return }
+              (try? io.liveAccountKey()) == key else { return }
+        // ★ 토큰과 신원이 어긋났으면 활성도 옮기지 않는다 — 열쇠가 가리키는 프로필이 실제 로그인이
+        //   아니다. 이 경로가 "Max 토큰을 Team 프로필에 저장 + Team을 활성으로"를 만들던 자리다(실패 기록 24).
+        //   불안정한 읽기(위 guard)는 로그인 도중의 일시적인 상태라 기억하지 않는다 — 거부만 기억한다.
+        guard io.canStoreLiveSecret(live) else {
+            if let fingerprint { rememberDeferredLive(provider, fingerprint: fingerprint) }
+            return
+        }
+        forgetDeferredLive(provider)
         try saveLiveSecret(live, for: profile.id)
         if !activeUnchanged {
             try store.setActive(profile.id)
@@ -369,5 +394,21 @@ public final class Switcher: @unchecked Sendable {
             // 플래그를 내려 onTick의 primary 자동 복귀를 막는다 (앱·CLI 공통 경로).
             try store.setAutoSwitchedFromPrimary(false, provider: provider)
         }
+    }
+
+    private func isDeferredLive(_ provider: Provider, fingerprint: Data) -> Bool {
+        deferredLiveLock.lock(); defer { deferredLiveLock.unlock() }
+        guard let deferred = deferredLive[provider], deferred.fingerprint == fingerprint else { return false }
+        return Date().timeIntervalSince(deferred.at) < deferredLiveRecheckInterval
+    }
+
+    private func rememberDeferredLive(_ provider: Provider, fingerprint: Data) {
+        deferredLiveLock.lock(); defer { deferredLiveLock.unlock() }
+        deferredLive[provider] = DeferredLive(fingerprint: fingerprint, at: Date())
+    }
+
+    private func forgetDeferredLive(_ provider: Provider) {
+        deferredLiveLock.lock(); defer { deferredLiveLock.unlock() }
+        deferredLive[provider] = nil
     }
 }

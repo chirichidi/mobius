@@ -717,7 +717,10 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     토큰, `claudeAiOauth` 없이 `mcpOAuth`만 남음, 빈 객체 `{}`)은 `.loggedOut`, blob의 `subscriptionType`이
     좌석형(team·enterprise)인지와 oauthAccount가 좌석형 조직(`seatTier` 우선, 없으면
     `organizationType`)인지가 다르면 `.organizationMismatch`다. 어긋나면 저장도 활성 이동도 하지 않고
-    다음 틱에 다시 본다. 같은 이메일의 개인 조직은 하나뿐이라 회사↔개인 혼입을 정확히 잡고, Pro→Max처럼
+    다음 틱에 다시 본다. 단 reconcile은 거부한 라이브의 신원 지문(oauthAccount 블록)을 기억해, 지문이 바뀌거나
+    5분이 지나기 전에는 Keychain을 다시 읽지 않는다. 거부되는 상태는 새 claude 세션이 bootstrap할 때까지 이어질 수
+    있어서, 그대로 두면 15초마다 Keychain을 두 번 읽는다(실패 기록 3·3b, 리뷰 지적). "라이브 이메일이 활성과 같으면
+    건너뛴다"로 막으면 같은 이메일의 다른 조직으로 앱 밖에서 로그인한 경우를 따라가지 못해 쓰지 않았다. 같은 이메일의 개인 조직은 하나뿐이라 회사↔개인 혼입을 정확히 잡고, Pro→Max처럼
     개인 구독 안에서 요금제가 바뀐 경우는 걸리지 않는다. `subscriptionType`이 null인 계보는 판정할 수 없다.
     (b) 이미 섞인 저장본은 **refresh하기 전에** 잡는다. 섞인 저장본은 대개 라이브나 다른 카드와 같은 refresh
     토큰을 쥐고 있어서, 회전하는 순간 올바른 쪽의 계보까지 끊긴다(리뷰에서 드러난 P1). 그래서
@@ -741,7 +744,9 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     새 토큰이 있으면 해제한다. 그 새 토큰은 새 로그인이거나, CAS를 통과한 다른 세션의 refresh 결과다.
     어느 쪽이든 살아 있고, 다른 조직의 것인지는 (a)·(b)가 거른다. 키가 없는 경우는 여전히 모르는 것으로 본다.
     (e) 표시: Team 등급이 organizationRateLimitTier의 내부 코드명("default_raven" → "Raven")으로
-    뜨던 것을 organizationType 우선으로 바꾸고("Team"), `capitalized`가 만들던 "Max 20X"를 "Max 20x"로
+    뜨던 것을 좌석형이면 조직 한도 등급을 보지 않도록 바꾸고("Team"), 좌석형 판정은 저장 판정과 같은
+    `isSeatOrganization`으로 한다 — 로그인 직후 organizationType이 비어 있을 때 LoginFlow가 등록한 카드도
+    seatTier의 앞 낱말로 "Team"이 된다(예전 "Team Tier 1" 표기도 "Team"으로 통일). `capitalized`가 만들던 "Max 20X"를 "Max 20x"로
     고쳤다. 기존 프로필은 `Switcher.refreshTierLabels`가 시작 때 저장 스냅샷에서 다시 계산한다. 한도에
     걸린 카드는 조직·등급 줄이 카운트다운으로 바뀌어 두 카드가 닉네임 말고는 구분되지 않았으므로,
     카운트다운 뒤에 조직·등급을 붙인다.
@@ -755,9 +760,13 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     조직의 새 토큰이 활성 프로필의 계보를 덮는다(리뷰 2회차 P2-3). reconcile은 보정하지 않는다 — 활성 마커를
     옮기지 않는 것까지가 그 경로의 몫이다.
     남는 것: 보정이 안 되는 경우(좌석형 조직이 둘 이상이거나, 토큰이 활성이 아닌 프로필의 종류)는 여전히
-    판정을 미루고, 그동안 동기화가 멈추며 15분 뒤 "동기화 실패" 배너가 뜬다. 등록하지 않은 같은 종류의
-    조직에서 온 토큰은 종류만으로 가를 수 없어 활성 프로필에 붙을 수 있다 — 그 프로필이 비활성이 되어
-    refresh될 때 (b)의 응답 대조가 잡는다. 사고 모양 그대로(활성 Max, 라이브에 Team 토큰) 업그레이드해
+    판정을 미루고, 그동안 동기화가 멈추며 15분 뒤 "동기화 실패" 배너가 뜬다. 로그인 없는 blob(빈 refresh 토큰)도
+    같은 카운터에 쌓인다. 배너는 사용자가 할 일을 알려 주지 못하고, 동기화가 멈춘 동안 그 결과에 기대는
+    배지 라이브 확인(`recomputeBadgeLive`)과 미리 전환(`pollThreshold`)도 함께 멈춘다. 사유별 문구는 나누지 않았다.
+    빈 토큰 자리를 다른 세션의 refresh가 CAS로 채웠는데 그 토큰이 **같은 종류의 다른 조직**(Team A ↔ Team B)
+    것이면, 판정을 통과해 활성 프로필에 저장되고 `ReauthClearance`가 딱지까지 내린다. 등록하지 않은 같은 종류의
+    조직에서 온 토큰도 종류만으로 가를 수 없어 활성 프로필에 붙을 수 있다 — 두 경우 모두 그 프로필이 비활성이
+    되어 refresh될 때 (b)의 응답 대조가 잡는다. 사고 모양 그대로(활성 Max, 라이브에 Team 토큰) 업그레이드해
     Team으로 전환하면 라이브의 최신 Team 토큰은 어디에도 저장되지 않는다(보정은 활성에만 붙인다 — 비활성
     프로필에 붙이면 라이브와 그 저장본이 계보를 나눠 가져, 폴백 refresh가 라이브를 죽일 수 있다). 수정 전과
     같은 결과이고, 그 Team 카드는 재로그인이 필요할 수 있다. 앱 안의 전환이 진행 중 refresh를 기다린 뒤

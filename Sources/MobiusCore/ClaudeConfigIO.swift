@@ -131,6 +131,15 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return Self.identity(fromOAuthBlock: block)?.key
     }
 
+    /// oauthAccount 블록 전체(키 정렬 JSON) — 파일 한 번 읽기(승인창 없음). 열쇠만 보지 않는 이유: 로그인은
+    /// 이 블록을 지우고 다시 쓰므로(2.1.281 실측, 핵심 사실 "토큰과 신원은 쓰는 경로가 다르다"), 같은 조직으로
+    /// 다시 로그인해 열쇠가 그대로여도 지문은 바뀐다. `profileFetchedAt` 같은 필드도 가끔 바뀌는데, 그때는
+    /// 한 번 더 읽을 뿐이다.
+    public func liveIdentityFingerprint() throws -> Data? {
+        guard let block = try readOAuthAccountDict() else { return nil }
+        return try JSONSerialization.data(withJSONObject: block, options: [.sortedKeys])
+    }
+
     /// oauthAccount 블록 → 표시용 신원. 라이브 읽기와 스냅샷 기반 등록(AccountStore)이 공유.
     /// organizationUuid가 없는 옛 claude.json이면 ""(조직 미상)으로 둔다 — 이메일만으로 대조된다.
     public static func identity(fromOAuthBlock block: [String: Any]) -> ProviderIdentity? {
@@ -151,20 +160,25 @@ extension ClaudeConfigIO: ProviderConfigIO {
     }
 
     /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로.
-    /// Team 워크스페이스의 oauthAccount는 organizationType·organizationRateLimitTier가 **둘 다 null**이고
-    /// `seatTier: "team_tier_1"`만 온다(실측 2026-09-11) — 그래서 seatTier까지 폴백한다("Team Tier 1").
-    /// ★ 좌석형 조직은 organizationType을 **먼저** 본다. 2026-09-24 실측에서 Team의
-    ///   organizationRateLimitTier는 `"default_raven"`으로 채워져 와서, 등급 칸에 내부 코드명
+    /// ★ 좌석형 조직(Team·Enterprise)은 organizationRateLimitTier를 **보지 않는다**. 2026-09-24 실측에서
+    ///   Team의 organizationRateLimitTier는 `"default_raven"`으로 채워져 와서, 등급 칸에 내부 코드명
     ///   "Raven"이 떴다. 조직 한도 등급은 개인 구독(Max 5x·20x)에서만 사람이 읽을 이름이다.
+    /// ★ 좌석형인지는 `isSeatOrganization` **한 곳**에서 정한다 — 저장 판정과 같은 규칙이어야 한다.
+    ///   로그인 직후에는 organizationType이 비어 있고 seatTier만 있어서(아래 판정의 주석), organizationType만
+    ///   보면 LoginFlow가 막 등록한 Team 카드가 "Raven"이나 "Team Tier 1"로 뜬다(리뷰 지적). 이때는 seatTier의
+    ///   앞 낱말(`"team_tier_1"` → "Team")을 쓴다 — 다른 Team 카드와 같은 표기가 된다.
     static func tierDescription(from block: [String: Any]) -> String {
-        switch block["organizationType"] as? String {
-        case "claude_team": return "Team"
-        case "claude_enterprise": return "Enterprise"
-        default: break
+        if isSeatOrganization(oauthBlock: block) == true {
+            switch block["organizationType"] as? String {
+            case "claude_team": return "Team"
+            case "claude_enterprise": return "Enterprise"
+            default:
+                let word = ((block["seatTier"] as? String) ?? "").split(separator: "_").first.map(String.init) ?? ""
+                return word.prefix(1).uppercased() + word.dropFirst()
+            }
         }
         let tier = (block["organizationRateLimitTier"] as? String)
-            ?? (block["organizationType"] as? String)
-            ?? (block["seatTier"] as? String) ?? ""
+            ?? (block["organizationType"] as? String) ?? ""
         return tier.replacingOccurrences(of: "default_", with: "")
             .replacingOccurrences(of: "claude_", with: "")
             .replacingOccurrences(of: "_", with: " ")

@@ -207,6 +207,11 @@ public final class FallbackAuthChecker: @unchecked Sendable {
     /// 비활성이면, 그 프로필의 스냅샷(자기 oauthAccount 유지)에 새 토큰을 반영한다. 서버는 이미 이전
     /// 토큰을 소비했으므로, 버리면 이 계보의 살아남는 사본이 하나도 없다(리뷰 P1). 주인이 활성이면
     /// 라이브가 그 계정을 관리하므로 넘기지 않는다. 주인이 없거나 여럿이면 버린다(모호하면 손대지 않는다).
+    /// ★ owner에 진행 중인 refresh(`inFlight[owner.id]`)가 있어도 합류하지 않는다 — 의도한 것이다. 겹치면
+    ///   두 회전본 중 하나가 버려질 수 있다(owner refresh의 락 안 재확인이 스냅샷 변경을 보고 `.transient`로
+    ///   빠지거나, 이 넘김이 owner의 방금 회전본을 덮는다). 둘 다 같은 조직의 살아 있는 토큰이라 어느 쪽이
+    ///   남아도 owner는 쓸 수 있는 계보를 갖는다. 합류하려면 이 경로가 owner의 refresh를 기다려야 하는데,
+    ///   그동안 source의 판정이 늦어지는 것에 비해 얻는 것이 없다(리뷰 P3).
     private func handOverRotation(_ tokens: RefreshedTokens, organizationUuid org: String, from id: UUID) {
         guard let source = store.file.accounts.first(where: { $0.id == id }) else { return }
         let owners = store.file.accounts.filter {

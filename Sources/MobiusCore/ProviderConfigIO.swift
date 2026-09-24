@@ -44,6 +44,10 @@ public protocol ProviderConfigIO: Sendable {
     /// 표시용 메타데이터를 포함한 신원 (등록/adopt 시). 로그아웃 상태면 nil.
     func liveIdentity() throws -> ProviderIdentity?
 
+    /// 라이브 신원 쪽의 지문. `liveAccountKey`와 같은 값싼 경로(승인창 없음)여야 한다. reconcile이 저장을
+    /// 거부한 라이브가 그대로인지 볼 때 쓴다(`Switcher.reconcile`). 로그아웃 상태면 nil.
+    func liveIdentityFingerprint() throws -> Data?
+
     /// 라이브 상태(비밀+이메일)를 간격을 두고 두 번 읽어 값이 일치할 때만 반환한다.
     /// 로그인/전환/토큰 리프레시 도중의 불일치 상태를 배제한다 (mtime 신호는 쓰지 않는다 —
     /// 두 프로바이더 모두 자격증명 파일이 "바쁜 파일"임이 실측됐다).
@@ -99,6 +103,11 @@ extension ProviderConfigIO {
     /// 기본: 이메일만 (조직 미상). Claude처럼 조직이 있는 프로바이더가 덮어쓴다.
     public func liveAccountKey() throws -> AccountKey? {
         try liveEmail().map { AccountKey(emailAddress: $0) }
+    }
+
+    /// 기본: 계정 열쇠. 저장을 거부하지 않는 프로바이더(`canStoreLiveSecret` 기본 구현)에서는 쓰이지 않는다.
+    public func liveIdentityFingerprint() throws -> Data? {
+        try liveAccountKey().map { Data("\($0.emailAddress)\u{0}\($0.organizationUuid)".utf8) }
     }
 }
 

@@ -76,13 +76,33 @@ final class ClaudeConfigIOTests: XCTestCase {
         // Team 워크스페이스 실측: organizationType·organizationRateLimitTier가 null, seatTier만 온다
         let teamSeat = #"{"oauthAccount":{"emailAddress":"p@x.com","organizationName":"acme-team","organizationType":null,"organizationRateLimitTier":null,"seatTier":"team_tier_1","organizationUuid":"5d1f0c9e-0000-0000-0000-000000000000"}}"#
         try Data(teamSeat.utf8).write(to: env.claudeJSON)
-        XCTAssertEqual(try XCTUnwrap(io.liveIdentity()).tierDescription, "Team Tier 1",
-                       "등급 필드가 전부 null이면 seatTier로 폴백해야 부제가 비지 않는다")
+        XCTAssertEqual(try XCTUnwrap(io.liveIdentity()).tierDescription, "Team",
+                       "등급 필드가 전부 null이면 seatTier로 폴백해야 부제가 비지 않는다 — 다른 Team 카드와 같은 표기로")
         try Data(withOrg.utf8).write(to: env.claudeJSON)
 
         // 스냅샷에서도 같은 신원이 나온다(구버전 프로필 조직 채우기·CLI capture가 쓰는 경로)
         let snap = try XCTUnwrap(io.readLiveSnapshot())
         XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: snap)?.key, identity.key)
+    }
+
+    /// 로그인 직후(organizationType이 아직 없음)에 LoginFlow가 등록하는 Team 카드도 "Raven"이 아니라
+    /// "Team"이어야 한다 — 좌석형 판정은 저장 판정과 같은 `isSeatOrganization`을 쓴다(리뷰 지적).
+    func testSeatOrganizationTierIgnoresRateLimitTierBeforeOrganizationTypeArrives() throws {
+        func tier(_ json: String) throws -> String {
+            let block = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            return ClaudeConfigIO.tierDescription(from: block)
+        }
+        XCTAssertEqual(try tier(#"{"organizationType":null,"organizationRateLimitTier":"default_raven","seatTier":"team_tier_1"}"#),
+                       "Team", "좌석형이면 조직 한도 등급(내부 코드명)을 보지 않는다")
+        XCTAssertEqual(try tier(#"{"organizationType":"claude_team","organizationRateLimitTier":"default_raven","seatTier":"team_tier_1"}"#),
+                       "Team")
+        XCTAssertEqual(try tier(#"{"organizationType":"claude_enterprise","organizationRateLimitTier":"default_raven","seatTier":"enterprise_tier_1"}"#),
+                       "Enterprise")
+        // 개인 구독은 그대로 조직 한도 등급을 읽는다
+        XCTAssertEqual(try tier(#"{"organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x","seatTier":null}"#),
+                       "Max 20x")
+        XCTAssertEqual(try tier(#"{"organizationType":null,"organizationRateLimitTier":"default_claude_max_5x","seatTier":null}"#),
+                       "Max 5x", "로그인 직후 개인 구독도 organizationType 없이 등급이 나온다")
     }
 
     func testWritePreservesOtherKeys() throws {

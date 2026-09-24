@@ -378,6 +378,58 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(try storedRefresh(max.id), "M0")
     }
 
+    /// 리뷰 P2-1: 신원만 되돌려진 라이브는 새 claude 세션이 다시 bootstrap할 때까지 그대로일 수 있다. reconcile이
+    /// 15초마다 같은 라이브를 다시 읽어 거부하면 그때마다 Keychain을 두 번 읽는다(`security` subprocess).
+    func testReconcileDoesNotRereadKeychainForSameRejectedLive() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        let service = env.claudeKeychainService
+        let before = kc.readsByService[service, default: 0]
+
+        try await switcher.reconcile()
+        let afterFirst = kc.readsByService[service, default: 0]
+        XCTAssertGreaterThan(afterFirst, before, "처음에는 읽어서 판정한다")
+
+        try await switcher.reconcile()
+        try await switcher.reconcile()
+
+        XCTAssertEqual(kc.readsByService[service, default: 0], afterFirst, "거부한 라이브가 그대로면 다시 읽지 않는다")
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+    }
+
+    /// 거부한 뒤라도 다시 로그인하면(로그인은 oauthAccount를 다시 쓴다) 곧바로 따라간다. "라이브 이메일이 활성과
+    /// 같으면 조기 반환"으로 막았다면, 같은 이메일의 다른 조직으로 앱 밖에서 로그인한 이 경우를 놓친다.
+    func testReconcileFollowsReloginAfterRejectedLive() async throws {
+        let (team, _) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        try await switcher.reconcile()   // 거부 — 지문을 기억한다
+
+        let relogged = Self.teamAccount.replacingOccurrences(of: #""seatTier""#, with: #""profileFetchedAt":1,"seatTier""#)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T2", account: relogged))
+        try await switcher.reconcile()
+
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T2")
+    }
+
+    /// 신원이 그대로여도 간격이 지나면 다시 본다 — 토큰 쪽 변화는 값싸게 볼 수 없어서 간격이 상한이다.
+    func testReconcileRechecksRejectedLiveAfterInterval() async throws {
+        let (team, _) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        try await switcher.reconcile()   // 거부
+
+        // 신원(oauthAccount)은 그대로 두고 토큰만 Team 것으로 바뀌었다
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T2", account: Self.teamAccount))
+        try await switcher.reconcile()
+        XCTAssertEqual(try storedRefresh(team.id), "T0", "간격 안에서는 다시 읽지 않는다")
+
+        switcher.deferredLiveRecheckInterval = 0
+        try await switcher.reconcile()
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T2")
+    }
+
     /// 보정(리뷰 P2-3): 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 Team으로 되돌렸다. Keychain의
     /// Max 토큰은 Mobius가 설치한 활성 프로필의 계보이므로, 동기화를 멈추지 않고 Max 프로필에 저장한다.
     /// 신원은 Max 저장본의 것을 쓴다 — 라이브의 oauthAccount는 되돌려진 옛 조직이다.
