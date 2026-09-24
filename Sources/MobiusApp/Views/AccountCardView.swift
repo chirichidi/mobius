@@ -142,7 +142,7 @@ struct AccountCardView: View {
         .contentShape(Rectangle())
     }
 
-    // 상단 "리셋까지" 카운트다운은 이 풀의 자동 전환이 켜져 있고(autoSwitchOn) 계정이
+    // 상단 "한도 소진 · N 후 초기화" 카운트다운은 이 풀의 자동 전환이 켜져 있고(autoSwitchOn) 계정이
     // **전반적으로** 소진일 때만 표시한다. usage로 볼 때 5시간·주간엔 여유가 있고 모델 스코프
     // (Fable 등)만 100%면, 계정은 다른 모델로 쓸 수 있으므로 상단 알람을 숨긴다
     // (그 한도는 아래 모델별 게이지가 이미 보여준다). 수동 모드에선 tier 설명으로 대체.
@@ -156,23 +156,21 @@ struct AccountCardView: View {
         //   쓸 수 있다(메뉴바·CLI·알림과 같은 규칙). 특히 usage를 아직 모를 때 generallyLimited는
         //   보수적으로 true라, 이 분기가 없으면 모델 한도만 있는 계정에 계정 소진 카운트다운이
         //   뜬다(셀프리뷰 지적).
+        // ★ 두 줄과 게이지 줄은 **같은 형식**을 쓴다: "<상태> · <남은 시간> 초기화", 남은 시간은
+        //   `remainText` 하나로 만든다. 예전엔 "모델 한도 · 0시간 27분 후 초기화", "리셋까지 1시간 37분",
+        //   게이지의 "초기화 27분 후"가 섞여 같은 종류의 정보가 다른 것처럼 읽혔다(사용자 지적 2026-09-24).
+        //   상태 이름은 CLI(`mobius list`)와 같다 — "모델 한도"(그 모델만)와 "한도 소진"(계정 전체).
+        //   `remainText`는 하루를 넘으면 일 단위로 말하므로 주간 한도가 "168시간 0분"이 되지 않는다.
         if autoSwitchOn, let rl = profile.rateLimit, rl.resetsAt > now, rl.modelScoped {
-            // ★ 모델 스코프 한도는 **주간**이다 — 시간으로만 쓰면 "168시간 0분"이 된다
-            //   (셀프리뷰 지적). 하루를 넘으면 일 단위로 말한다.
-            let mins = max(0, Int(rl.resetsAt.timeIntervalSince(now) / 60))
-            let text = mins >= 24 * 60
-                ? loc("모델 한도 · %d일 %d시간 후 초기화", mins / (24 * 60), (mins / 60) % 24)
-                : loc("모델 한도 · %d시간 %d분 후 초기화", mins / 60, mins % 60)
             HStack(spacing: 4) {
-                Label(text, systemImage: "sparkles")
+                Label(loc("모델 한도 · %@ 초기화", remainText(until: rl.resetsAt)), systemImage: "sparkles")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize()
                 subtitleTrailer
             }
         } else if autoSwitchOn, let rl = profile.rateLimit, rl.resetsAt > now, generallyLimited {
-            let mins = max(0, Int(rl.resetsAt.timeIntervalSince(now) / 60))
             HStack(spacing: 4) {
-                Label(loc("리셋까지 %d시간 %d분", mins / 60, mins % 60), systemImage: "hourglass")
+                Label(loc("한도 소진 · %@ 초기화", remainText(until: rl.resetsAt)), systemImage: "hourglass")
                     .font(.system(size: 10)).foregroundStyle(.orange)
                     .fixedSize()
                 subtitleTrailer
@@ -263,7 +261,7 @@ struct AccountCardView: View {
                 .lineLimit(1).fixedSize()
                 .frame(width: 36, alignment: .trailing)
             if let resetsAt, resetsAt > now {
-                Text(loc("초기화 %@", remainText(until: resetsAt)))
+                Text(loc("%@ 초기화", remainText(until: resetsAt)))
                     .font(.system(size: 10)).foregroundStyle(.tertiary)
                     .lineLimit(1).fixedSize()
             }

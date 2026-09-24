@@ -152,12 +152,11 @@
 "Claude Desktop 연결" = "Connect Claude Desktop";
 "이 계정으로 전환한 뒤 연결할 수 있어요" = "Switch to this account first to connect";
 "계정 삭제" = "Delete account";
-"모델 한도 · %d일 %d시간 후 초기화" = "Model limit · resets in %dd %dh";
-"모델 한도 · %d시간 %d분 후 초기화" = "Model limit · resets in %dh %dm";
-"리셋까지 %d시간 %d분" = "%dh %dm until reset";
+"모델 한도 · %@ 초기화" = "Model limit · resets %@";
+"한도 소진 · %@ 초기화" = "Limit reached · resets %@";
 "5시간" = "5h";
 "주간" = "Weekly";
-"초기화 %@" = "Resets %@";
+"%@ 초기화" = "Resets %@";
 "%d일 %d시간 후" = "in %dd %dh";
 "%d시간 %d분 후" = "in %dh %dm";
 "%d분 후" = "in %dm";
