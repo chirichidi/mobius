@@ -233,6 +233,28 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return Self.liveSnapshotVerdict(snap) == .storable
     }
 
+    /// 어긋난 라이브(`.organizationMismatch`)의 토큰 종류(좌석형/개인 구독)가 `stored`의 oauthAccount
+    /// 조직 종류와 같으면, 라이브 토큰에 `stored`의 oauthAccount를 붙인 스냅샷을 돌려준다.
+    /// 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 옛 조직으로 되돌린 경우, Keychain 토큰은
+    /// Mobius가 설치한 활성 프로필의 것이 맞다(2.1.281 refresh 저장은 CAS라 다른 세션이 덮지 못한다).
+    /// 그 토큰을 버리면 판정을 미루는 동안 회전된 계보를 잃는다(리뷰 P2-3). **어느 프로필에 붙일지는
+    /// 호출자(Switcher)가 정한다** — 이 함수는 종류가 맞는지만 본다. `stored` 자체가 섞여 있으면 nil.
+    public func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data? {
+        let decoder = JSONDecoder()
+        guard let liveSnap = try? decoder.decode(CredentialsSnapshot.self, from: live),
+              let storedSnap = try? decoder.decode(CredentialsSnapshot.self, from: stored),
+              Self.liveSnapshotVerdict(liveSnap) == .organizationMismatch,
+              Self.liveSnapshotVerdict(storedSnap) == .storable,
+              let tokenSeat = CredentialBlob.isSeatSubscription(from: liveSnap.keychainBlob),
+              let json = storedSnap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              Self.isSeatOrganization(oauthBlock: block) == tokenSeat
+        else { return nil }
+        return try? JSONEncoder().encode(CredentialsSnapshot(keychainBlob: liveSnap.keychainBlob,
+                                                             credentialsFileData: liveSnap.credentialsFileData,
+                                                             oauthAccountJSON: storedSnap.oauthAccountJSON))
+    }
+
     /// Claude secret은 CredentialsSnapshot JSON이다 — 디코드되면 Claude 형태.
     /// Codex auth.json(keychainBlob/credentialsFileData 키 없음)은 여기서 디코드 실패한다.
     public func recognizesSecret(_ data: Data) -> Bool {

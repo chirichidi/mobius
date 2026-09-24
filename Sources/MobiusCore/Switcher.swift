@@ -131,18 +131,54 @@ public final class Switcher: @unchecked Sendable {
     /// 반환: 되저장된 프로필 id (일치 프로필 없으면 nil).
     /// 사용자 전환(switchTo) 직전에 호출 — 라이브가 settled 상태이므로 단일 읽기로 충분하다.
     /// provider 기본값 없음 — 풀을 바꾸는 연산은 대상 풀을 항상 명시한다 (오라우팅 방지).
-    /// ★ 토큰과 신원이 어긋난 라이브는 되저장하지 않는다(`canStoreLiveSecret`, 실패 기록 24) —
-    ///   남의 조직 토큰을 떠나는 프로필에 박으면 두 프로필이 한 계보를 나눠 갖게 된다.
+    /// ★ 토큰과 신원이 어긋난 라이브는 열쇠가 가리키는 프로필에 되저장하지 않는다(`canStoreLiveSecret`,
+    ///   실패 기록 24) — 남의 조직 토큰을 떠나는 프로필에 박으면 두 프로필이 한 계보를 나눠 갖게 된다.
+    ///   다만 토큰이 활성 프로필의 것으로 보이면(`reattributedToActive`) 그쪽에 저장한다 — 떠나는
+    ///   활성 프로필의 최신 계보를 잃지 않게.
     @discardableResult
     public func resaveLiveIntoMatchingProfile(provider: Provider) throws -> UUID? {
         guard let io = ios[provider],
               let live = try io.readLiveSecretData(),
-              io.canStoreLiveSecret(live),
-              let key = try io.liveAccountKey(),
-              let profile = store.file.firstAccount(provider: provider, matching: key)
+              let key = try io.liveAccountKey()
         else { return nil }
-        try saveLiveSecret(live, for: profile.id)
-        return profile.id
+        if io.canStoreLiveSecret(live) {
+            guard let profile = store.file.firstAccount(provider: provider, matching: key) else { return nil }
+            try saveLiveSecret(live, for: profile.id)
+            return profile.id
+        }
+        guard let (id, repaired) = reattributedToActive(provider: provider, io: io, live: live,
+                                                        email: key.emailAddress) else { return nil }
+        try saveLiveSecret(repaired, for: id)
+        return id
+    }
+
+    /// 어긋난 라이브의 토큰이 **활성 프로필의 것**으로 보이면 (그 프로필 id, 저장할 secret)을 돌려준다.
+    ///
+    /// 2.1.281에서 두 곳이 어긋나는 흔한 경로는 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 옛
+    /// 조직으로 되돌리는 경우다. 이때 Keychain 토큰은 Mobius가 마지막에 설치한 활성 프로필의 계보다
+    /// (refresh 저장이 CAS라 다른 세션이 덮지 못한다). 판정을 미루기만 하면 그사이 claude가 토큰을
+    /// 회전하고 사용자가 전환할 때 활성 프로필의 저장본이 소비된 토큰으로 남는다(리뷰 P2-3).
+    ///
+    /// 조건은 셋이다: 라이브 열쇠의 이메일이 활성 프로필의 이메일과 같다, 토큰 종류(좌석형/개인 구독)가
+    /// 활성 프로필 저장본의 조직 종류와 같다(`liveSecret(_:reattributedTo:)`), 그리고 같은 이메일에서
+    /// 그 종류가 맞는 프로필이 **활성 하나뿐**이다. 개인 조직은 이메일당 하나라 개인 구독 토큰은 항상
+    /// 주인이 하나로 정해지고, 좌석형 조직이 둘 이상이면 가릴 수 없어 nil이다(모호하면 손대지 않는다).
+    /// 신원은 활성 프로필 저장본의 oauthAccount를 쓴다 — 라이브의 것은 되돌려진 옛 조직이다.
+    private func reattributedToActive(provider: Provider, io: any ProviderConfigIO,
+                                      live: Data, email: String) -> (id: UUID, data: Data)? {
+        guard let activeID = store.file.activeByProvider[provider],
+              store.file.accounts.first(where: { $0.id == activeID })?.emailAddress == email
+        else { return nil }
+        var owners: [(id: UUID, data: Data)] = []
+        for p in store.file.accounts where p.provider == provider && p.emailAddress == email {
+            // stat 게이트 — 구버전 Keychain 폴백(승인창)은 타지 않는다
+            guard FileManager.default.fileExists(atPath: env.secretFile(for: p.id).path),
+                  let stored = try? store.secretData(for: p.id),
+                  let repaired = io.liveSecret(live, reattributedTo: stored) else { continue }
+            owners.append((p.id, repaired))
+        }
+        guard owners.count == 1, let owner = owners.first, owner.id == activeID else { return nil }
+        return owner
     }
 
     /// 라이브 자격증명을 프로필 스냅샷으로 저장한다. refresh 토큰이 **다른 값으로 교체**됐으면
@@ -190,18 +226,32 @@ public final class Switcher: @unchecked Sendable {
         let provider = Provider.claude
         guard let io = ios[provider],
               let key = try? io.liveAccountKey(),
-              let profile = store.file.firstAccount(provider: provider, matching: key),
-              profile.id == store.file.activeByProvider[provider] else { return false }
+              let activeID = store.file.activeByProvider[provider] else { return false }
+        let keyIsActive = store.file.firstAccount(provider: provider, matching: key)?.id == activeID
+        // 열쇠가 활성 프로필을 가리키지 않으면 보통은 다른 계정의 라이브다(reconcile 몫). 다만 같은
+        // 이메일이면 oauthAccount만 옛 조직으로 되돌려진 경우일 수 있어 아래 보정 경로까지 본다.
+        guard keyIsActive
+                || store.file.accounts.first(where: { $0.id == activeID })?.emailAddress == key.emailAddress
+        else { return false }
         // 안정 읽기 뒤 열쇠를 한 번 더 확인한다 — 같은 이메일의 다른 조직으로 로그인이 끝난 직후라면
         // 이메일은 같아도 조직이 달라, 이 프로필에 남의 조직 토큰을 저장하게 된다(파일 읽기 한 번).
-        // 토큰과 신원이 어긋났으면(다른 조직 토큰, 로그아웃 도중의 빈 토큰) 저장하지 않는다 —
-        // false는 "이번 사이클은 신선하지 않다"는 뜻이라 호출자 계약과도 맞는다(실패 기록 24).
         guard let (data, stableEmail) = await io.readStableLiveSecretData(),
               stableEmail == key.emailAddress,
-              (try? io.liveAccountKey()) == key,
-              io.canStoreLiveSecret(data) else { return false }
+              (try? io.liveAccountKey()) == key else { return false }
+        // 토큰과 신원이 맞으면 그대로, 어긋났으면 토큰이 활성 프로필의 것으로 보일 때만 보정해 저장한다.
+        // 둘 다 아니면(다른 조직 토큰, 로그인 없는 blob) 저장하지 않는다 — false는 "이번 사이클은 신선하지
+        // 않다"는 뜻이라 호출자 계약과도 맞는다(실패 기록 24).
+        let toSave: Data
+        if keyIsActive, io.canStoreLiveSecret(data) {
+            toSave = data
+        } else if let (_, repaired) = reattributedToActive(provider: provider, io: io, live: data,
+                                                           email: key.emailAddress) {
+            toSave = repaired
+        } else {
+            return false
+        }
         do {
-            try saveLiveSecret(data, for: profile.id)
+            try saveLiveSecret(toSave, for: activeID)
             return true
         } catch {
             return false // 디스크 실패 등 — 신선하다고 보고하면 안 된다 (위 계약 참조)

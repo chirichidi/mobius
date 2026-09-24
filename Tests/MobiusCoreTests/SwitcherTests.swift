@@ -378,6 +378,55 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(try storedRefresh(max.id), "M0")
     }
 
+    /// 보정(리뷰 P2-3): 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 Team으로 되돌렸다. Keychain의
+    /// Max 토큰은 Mobius가 설치한 활성 프로필의 계보이므로, 동기화를 멈추지 않고 Max 프로필에 저장한다.
+    /// 신원은 Max 저장본의 것을 쓴다 — 라이브의 oauthAccount는 되돌려진 옛 조직이다.
+    func testActiveSyncReattributesTokenWhenOnlyAccountInfoWasReverted() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertTrue(wrote)
+        XCTAssertEqual(try storedRefresh(max.id), "M1", "회전된 Max 계보를 잃지 않는다")
+        let maxSnap = try XCTUnwrap(store.secret(for: max.id))
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: maxSnap)?.organizationUuid, "org-max")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+    }
+
+    /// 같은 보정이 전환 직전 되저장에도 적용된다 — 떠나는 활성 프로필의 최신 계보를 챙긴 뒤 전환한다.
+    func testSwitchResavesReattributedTokenIntoLeavingActive() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+
+        try switcher.switchTo(team.id)
+
+        XCTAssertEqual(try storedRefresh(max.id), "M1")
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: try XCTUnwrap(store.secret(for: max.id)))?.organizationUuid,
+                       "org-max")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-team"))
+    }
+
+    /// 주인이 하나로 정해지지 않으면 보정하지 않는다 — 같은 이메일에 좌석형 조직이 둘이면 Team 토큰이
+    /// 어느 쪽 것인지 종류만으로는 모른다.
+    func testReattributionRefusesWhenTwoSeatProfilesCouldOwnTheToken() async throws {
+        let teamB = #"{"emailAddress":"t@x.com","organizationName":"other-team","organizationType":"claude_team","seatTier":"team_tier_1","organizationUuid":"org-team-b"}"#
+        let (team, _) = try setUpTwoOrganizations()
+        let other = try store.upsertProfile(nickname: "team-b", snapshot: orgSnap(token: "team", refresh: "B0", account: teamB))
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+        // oauthAccount만 개인 Max로 되돌려진 상태 — 토큰은 Team 계열인데 Team 프로필이 둘이다
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(try storedRefresh(other.id), "B0")
+    }
+
     /// 전환 직전 되저장도 같은 판정을 탄다 — 떠나는 프로필에 남의 조직 토큰을 박지 않고, 전환 자체는 진행한다.
     func testSwitchSkipsResaveOfMismatchedLiveButStillSwitches() throws {
         let (team, max) = try setUpTwoOrganizations()

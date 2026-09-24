@@ -63,11 +63,19 @@ public protocol ProviderConfigIO: Sendable {
     /// 미룬다(다음 틱에 다시 본다). Claude는 토큰(Keychain)과 신원(~/.claude.json)을 따로 읽어
     /// 짝짓기 때문에 필요하다(실패 기록 24). 신원이 토큰 안에 있는 프로바이더는 기본 구현으로 충분하다.
     func canStoreLiveSecret(_ data: Data) -> Bool
+
+    /// 저장할 수 없는 라이브 secret(`canStoreLiveSecret`이 false)의 **토큰**이 `stored`(어느 프로필의
+    /// 저장본)와 같은 계정의 것으로 보이면, 토큰은 라이브의 것을 쓰고 신원은 `stored`의 것을 쓴 secret을
+    /// 돌려준다. 아니면 nil. Claude에서 신원만 옛 조직으로 되돌려진 경우를 보정하는 데 쓴다(실패 기록 24).
+    func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data?
 }
 
 extension ProviderConfigIO {
     /// 기본: 항상 저장 가능 — Codex auth.json은 신원(JWT)이 토큰과 한 파일에 있어 어긋날 수 없다.
     public func canStoreLiveSecret(_ data: Data) -> Bool { true }
+
+    /// 기본: 보정 없음 — 신원이 토큰과 한 파일에 있는 프로바이더는 어긋날 일이 없다.
+    public func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data? { nil }
 
     public func readStableLiveSecretData() async -> (data: Data, email: String)? {
         await readStableLiveSecretData(gap: .milliseconds(700))
