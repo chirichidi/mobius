@@ -21,14 +21,19 @@ public enum FallbackCheckResult: Equatable, Sendable {
     case dead            // invalid_grant → 재로그인 필요
     case transient       // 네트워크/5xx → 마킹 안 함(재시도)
     case storeFailed     // refresh 성공했으나 저장 실패 → 새 토큰 유실 → 재로그인 필요로 마킹
-    /// refresh 응답의 조직이 프로필의 조직과 다르다 — 저장 스냅샷이 **남의 조직 토큰**을 들고
-    /// 있었다(실패 기록 24). 회전본은 저장하지 않고 재로그인 필요로 마킹한다: 그 토큰을 이
-    /// 프로필에 두면 카드가 다른 조직의 사용량을 보여 주고, 전환하면 다른 조직으로 로그인된다.
+    /// refresh 응답의 조직(또는 계정 이메일)이 프로필과 다르다 — 저장 스냅샷이 **남의 토큰**을 들고
+    /// 있었다(실패 기록 24). 회전본은 이 프로필에 저장하지 않고 재로그인 필요로 마킹한다: 그 토큰을
+    /// 이 프로필에 두면 카드가 다른 조직의 사용량을 보여 주고, 전환하면 다른 조직으로 로그인된다.
     case organizationMismatch
     /// 저장 스냅샷 자체의 토큰과 oauthAccount가 서로 다른 조직 종류를 가리킨다(네트워크 0 판정).
     /// refresh하지 않고 재로그인 필요로 마킹한다. `organizationMismatch`와 나눈 이유는 알림 담당이
     /// 다르기 때문이다 — `locallyDead`/`dead`처럼 로컬 판정은 팝오버의 로컬 검증이 알린다.
     case mixedSnapshot
+    /// 다른 계정(열쇠가 다른 프로필)의 저장본과 **같은 refresh 토큰**을 쥐고 있다(네트워크 0 판정).
+    /// refresh하면 다른 쪽 사본이 죽으므로 하지 않고, 이 프로필을 재로그인 필요로 마킹한다. 이 프로필이
+    /// 실제 주인이었더라도 다른 쪽이 refresh될 때 응답 대조가 회전본을 이쪽에 넘겨 되살린다.
+    /// 마킹하지 않으면 전환 직전 검증이 매 틱 같은 후보에서 멈춰 자동 전환이 막힌다(리뷰 2회차 P2-2).
+    case sharedLineage
 }
 
 public final class FallbackAuthChecker: @unchecked Sendable {
@@ -82,6 +87,9 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         if ClaudeConfigIO.liveSnapshotVerdict(snap) == .organizationMismatch {
             try? store.setNeedsReauth(id, true); return .mixedSnapshot
         }
+        if let rt = CredentialBlob.refreshToken(from: snap.keychainBlob), sharesRefreshToken(rt, with: id) {
+            try? store.setNeedsReauth(id, true); return .sharedLineage
+        }
         guard allowNetwork else { return .transient }   // 로컬 검사 통과 — 네트워크는 생략
 
         // 같은 계정의 네트워크 refresh는 동시에 1건만 — 진행 중이면 그 결과에 합류한다.
@@ -107,11 +115,12 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         guard let rt = CredentialBlob.refreshToken(from: snap.keychainBlob) else {
             try? store.setNeedsReauth(id, true); return .noRefreshToken
         }
-        // 다른 Claude 프로필의 저장본이 **같은 refresh 토큰**을 쥐고 있으면 refresh하지 않는다. 한 계보를
-        // 두 프로필이 나눠 가진 상태 자체가 오염이고(실패 기록 24), 회전하면 다른 쪽 사본이 invalid_grant가
-        // 된다. 누가 주인인지는 여기서 가릴 수 없으므로 마킹 없이 판정을 미룬다. 위의 스냅샷 판정이 못 잡는
-        // 경우(같은 종류의 두 조직, subscriptionType이 없는 옛 계보)를 막는 자리다.
-        if sharesRefreshToken(rt, exceptProfile: id) { return .transient }
+        // 다른 계정의 저장본이 **같은 refresh 토큰**을 쥐고 있으면 refresh하지 않는다(check 상단과 같은
+        // 판정 — 게이트 안에서 다시 읽은 스냅샷으로 한 번 더 본다). 한 계보를 두 프로필이 나눠 가진 상태
+        // 자체가 오염이고(실패 기록 24), 회전하면 다른 쪽 사본이 invalid_grant가 된다.
+        if sharesRefreshToken(rt, with: id) {
+            try? store.setNeedsReauth(id, true); return .sharedLineage
+        }
         let scopes = CredentialBlob.scopes(from: snap.keychainBlob)
         do {
             let tokens = try await refresher.refresh(refreshToken: rt, scopes: scopes, now: now)
@@ -119,10 +128,15 @@ public final class FallbackAuthChecker: @unchecked Sendable {
             guard let newSnap = snap.applyingRefreshedTokens(tokens) else {
                 try? store.setNeedsReauth(id, true); return .storeFailed
             }
-            let profileOrg = store.file.accounts.first(where: { $0.id == id })?.organizationUuid ?? ""
+            let profile = store.file.accounts.first(where: { $0.id == id })
+            let profileOrg = profile?.organizationUuid ?? ""
             let foreignOrg = tokens.organizationUuid.flatMap {
                 !profileOrg.isEmpty && $0 != profileOrg ? $0 : nil
             }
+            // 계정(이메일)이 다르면 조직이 같아도 남의 토큰이다 — 한 회사 조직에는 여러 이메일이 속한다.
+            let foreignAccount = tokens.accountEmail.map {
+                $0.lowercased() != (profile?.emailAddress.lowercased() ?? "")
+            } ?? false
             // ★ 저장은 credential lock 안에서 다시 확인한 뒤에 한다(Codex 경로와 같은 규칙).
             //   HTTP 왕복 사이에 (1) 재로그인·되저장이 이 프로필에 새 스냅샷을 썼으면 옛 계보의
             //   회전본으로 덮지 않고, (2) 이 계정이 활성이 됐으면 라이브(~/.claude)를 건드리지 않는다.
@@ -133,9 +147,9 @@ public final class FallbackAuthChecker: @unchecked Sendable {
             let outcome = store.withCredentialLock(id) { () -> FallbackCheckResult in
                 guard (try? store.secret(for: id)) == snap,
                       store.file.activeByProvider[.claude] != id else { return .transient }
-                // 응답이 말하는 조직이 이 프로필의 조직과 다르면 저장할 자리가 아니다. 추가 호출 없이
+                // 응답이 말하는 조직·계정이 이 프로필과 다르면 저장할 자리가 아니다. 추가 호출 없이
                 // 오염을 잡는 지점이고, 같은 종류의 두 조직(Team과 다른 Team)도 여기서는 갈린다.
-                if foreignOrg != nil {
+                if foreignOrg != nil || foreignAccount {
                     try? store.setNeedsReauth(id, true); return .organizationMismatch
                 }
                 do {
@@ -147,8 +161,9 @@ public final class FallbackAuthChecker: @unchecked Sendable {
                     try? store.setNeedsReauth(id, true); return .storeFailed
                 }
             }
-            // 락을 놓은 뒤에 넘긴다 — 두 프로필의 credential lock을 겹쳐 잡지 않는다.
-            if outcome == .organizationMismatch, let foreignOrg {
+            // 락을 놓은 뒤에 넘긴다 — 두 프로필의 credential lock을 겹쳐 잡지 않는다. 계정이 다른 토큰은
+            // 넘기지 않는다: 주인 후보를 이메일로 고르므로, 남의 계정 토큰을 이 이메일의 카드에 붙이게 된다.
+            if outcome == .organizationMismatch, !foreignAccount, let foreignOrg {
                 handOverRotation(tokens, organizationUuid: foreignOrg, from: id)
             }
             return outcome
@@ -167,13 +182,23 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         _ = await task?.value
     }
 
-    /// `id` 말고 다른 Claude 프로필의 저장본이 이 refresh 토큰을 쥐고 있는가.
+    /// 다른 **계정**(열쇠가 다른 Claude 프로필)의 저장본이 이 refresh 토큰을 쥐고 있는가.
+    /// 세지 않는 프로필이 셋 있다(리뷰 2회차 P2-1):
+    ///   - 열쇠가 같은 프로필 — 같은 계정의 중복 등록이지 조직 간 오염이 아니다
+    ///   - 이미 재로그인 필요로 마킹된 프로필 — 그 사본은 죽은 것으로 취급된다. 세면 섞인 카드와 계보를
+    ///     나눈 **올바른** 카드까지 refresh가 막혀 게이지가 멈추고 결국 토큰이 만료된다. 단 **활성** 프로필은
+    ///     마킹돼 있어도 센다 — 그 저장본은 라이브와 같은 토큰이라, 빼면 이 refresh가 라이브를 죽인다
+    ///   - 저장본 자체가 섞인 프로필(`.organizationMismatch`) — 잘못된 사본으로 확정된 것이다(위와 같은 이유)
     /// 비밀 **파일이 있는** 계정만 읽는다(stat 게이트 — 구버전 Keychain 폴백 승인창을 타지 않는다).
-    private func sharesRefreshToken(_ rt: String, exceptProfile id: UUID) -> Bool {
-        store.file.accounts.contains { other in
-            guard other.provider == .claude, other.id != id,
+    private func sharesRefreshToken(_ rt: String, with id: UUID) -> Bool {
+        guard let me = store.file.accounts.first(where: { $0.id == id }) else { return false }
+        let activeID = store.file.activeByProvider[.claude]
+        return store.file.accounts.contains { other in
+            guard other.provider == .claude, other.id != id, other.key != me.key,
+                  !other.needsReauth || other.id == activeID,
                   FileManager.default.fileExists(atPath: store.env.secretFile(for: other.id).path),
-                  let theirs = try? store.secret(for: other.id) else { return false }
+                  let theirs = try? store.secret(for: other.id),
+                  ClaudeConfigIO.liveSnapshotVerdict(theirs) != .organizationMismatch else { return false }
             return CredentialBlob.refreshToken(from: theirs.keychainBlob) == rt
         }
     }

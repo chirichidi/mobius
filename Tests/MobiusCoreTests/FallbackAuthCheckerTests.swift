@@ -266,15 +266,75 @@ final class FallbackAuthCheckerTests: XCTestCase {
         XCTAssertTrue(reauth(mixed.id))
     }
 
-    /// 두 프로필이 같은 refresh 토큰을 쥐고 있으면 refresh하지 않는다 — 조직 종류가 같거나
-    /// subscriptionType이 없어 스냅샷 판정이 못 가르는 경우의 안전장치.
-    func testSharedRefreshTokenIsNotRefreshed() async throws {
+    /// 두 계정이 같은 refresh 토큰을 쥐고 있으면 refresh하지 않는다 — 조직 종류가 같거나
+    /// subscriptionType이 없어 스냅샷 판정이 못 가르는 경우의 안전장치. 여기서는 다른 쪽이 활성이라
+    /// refresh하면 라이브가 죽는다. 이쪽을 마킹해야 전환 직전 검증이 매 틱 같은 후보에서 멈추지 않는다.
+    func testSharedRefreshTokenIsNotRefreshedAndIsMarked() async throws {
         try store.setSecret(snap(email: "a@x.com", rt: "FRT", rteMs: futureRteMs), for: active.id)
         let mock = MockRefresher(.success(tokens(org: nil)))
-        let r = await FallbackAuthChecker(store: store, refresher: mock).check(fallback.id, activeAccountID: active.id, now: now)
-        XCTAssertEqual(r, .transient)
+        let checker = FallbackAuthChecker(store: store, refresher: mock)
+        let local = await checker.check(fallback.id, activeAccountID: active.id, now: now, allowNetwork: false)
+        XCTAssertEqual(local, .sharedLineage, "팝오버의 로컬 검증에서도 잡힌다")
         XCTAssertEqual(mock.callCount, 0)
-        XCTAssertFalse(reauth(fallback.id), "누가 주인인지 모르므로 마킹하지 않는다")
+        XCTAssertTrue(reauth(fallback.id))
+    }
+
+    /// 활성은 마킹돼 있어도 공유 판정에서 뺄 수 없다 — 그 저장본은 라이브와 같은 토큰이다.
+    func testFlaggedActiveStillCountsAsSharingButFlaggedFallbackDoesNot() async throws {
+        try store.setSecret(snap(email: "a@x.com", rt: "FRT", rteMs: futureRteMs), for: active.id)
+        try store.setNeedsReauth(active.id, true)
+        let r1 = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(tokens(org: nil))))
+            .check(fallback.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(r1, .sharedLineage)
+
+        // 비활성끼리라면 이미 마킹된 쪽의 사본은 죽은 것으로 보고 세지 않는다
+        let third = try store.upsertProfile(nickname: "third", snapshot: snap(email: "c@x.com", rt: "CRT", rteMs: futureRteMs))
+        try store.setSecret(snap(email: "c@x.com", rt: "FRT", rteMs: futureRteMs), for: third.id)
+        try store.setSecret(snap(email: "a@x.com", rt: "ART", rteMs: futureRteMs), for: active.id)
+        try store.setNeedsReauth(fallback.id, true)
+        let mock = MockRefresher(.success(tokens(org: nil)))
+        let r2 = await FallbackAuthChecker(store: store, refresher: mock).check(third.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(r2, .refreshedAlive)
+        XCTAssertEqual(mock.callCount, 1)
+    }
+
+    /// 리뷰 2회차 P2-1: 사고 모양 그대로 업그레이드한 사용자 — 섞인 Max 카드와 올바른 Team 카드가 같은
+    /// refresh 토큰을 쥐고 있다. 섞인 쪽은 잘못된 사본으로 확정됐으므로, 올바른 쪽의 refresh를 막지 않는다.
+    func testMixedCopyDoesNotBlockTheRightfulOwnersRefresh() async throws {
+        let mixedBlob = Data(#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"ORT","expiresAt":1,"refreshTokenExpiresAt":\#(futureRteMs),"subscriptionType":"team"}}"#.utf8)
+        _ = try store.upsertProfile(nickname: "max", snapshot: CredentialsSnapshot(
+            keychainBlob: mixedBlob, credentialsFileData: mixedBlob,
+            oauthAccountJSON: Data(#"{"emailAddress":"t@x.com","organizationType":"claude_max","seatTier":null,"organizationUuid":"org-max"}"#.utf8)))
+        let team = try orgFallback(org: "org-team")   // 같은 "ORT"를 쥔 올바른 카드
+        let mock = MockRefresher(.success(tokens(org: "org-team")))
+
+        let r = await FallbackAuthChecker(store: store, refresher: mock).check(team.id, activeAccountID: active.id, now: now)
+
+        XCTAssertEqual(r, .refreshedAlive)
+        XCTAssertEqual(mock.callCount, 1)
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: team.id)).keychainBlob), "NRT")
+    }
+
+    /// 리뷰 2회차 P2-4: 조직이 같아도 계정(이메일)이 다르면 남의 토큰이다. 이메일로 고르는 주인에게도 넘기지 않는다.
+    func testRefreshFromAnotherAccountIsNotStoredOrHandedOver() async throws {
+        let team = try orgFallback(org: "org-team")
+        let bobTokens = RefreshedTokens(accessToken: "NAT", refreshToken: "NRT", expiresAtMs: 123,
+                                        refreshTokenExpiresAtMs: futureRteMs + 1, scopes: nil,
+                                        organizationUuid: "org-team", accountEmail: "bob@x.com")
+        let r = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(bobTokens)))
+            .check(team.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(r, .organizationMismatch)
+        XCTAssertTrue(reauth(team.id))
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: team.id)).keychainBlob), "ORT")
+
+        // 대소문자만 다른 이메일은 같은 계정이다
+        let sameTokens = RefreshedTokens(accessToken: "NAT", refreshToken: "NRT2", expiresAtMs: 123,
+                                         refreshTokenExpiresAtMs: futureRteMs + 1, scopes: nil,
+                                         organizationUuid: "org-team", accountEmail: "T@X.com")
+        try store.setNeedsReauth(team.id, false)
+        let same = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(sameTokens)))
+            .check(team.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(same, .refreshedAlive)
     }
 
     /// 응답으로 불일치가 드러나면 회전본을 버리지 않고, 그 조직의 비활성 프로필에 넘긴다 — 서버는 이미

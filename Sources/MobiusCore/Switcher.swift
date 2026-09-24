@@ -4,6 +4,9 @@ public enum SwitcherError: Error, Equatable {
     case unknownAccount
     case noStoredSecret
     case unsupportedProvider(Provider)
+    /// 대상 프로필의 저장본이 다른 조직의 토큰과 그 프로필의 신원을 섞어 들고 있다(실패 기록 24).
+    /// 설치하면 사용자가 고른 카드와 다른 조직으로 로그인되므로 전환하지 않는다 — 복구는 '다시 로그인'.
+    case mixedSnapshot
 }
 
 /// 소실됐던 provider를 secret 형태로 재도출해 되돌린 기록 (사용자 경고용).
@@ -160,25 +163,28 @@ public final class Switcher: @unchecked Sendable {
     /// 회전하고 사용자가 전환할 때 활성 프로필의 저장본이 소비된 토큰으로 남는다(리뷰 P2-3).
     ///
     /// 조건은 셋이다: 라이브 열쇠의 이메일이 활성 프로필의 이메일과 같다, 토큰 종류(좌석형/개인 구독)가
-    /// 활성 프로필 저장본의 조직 종류와 같다(`liveSecret(_:reattributedTo:)`), 그리고 같은 이메일에서
-    /// 그 종류가 맞는 프로필이 **활성 하나뿐**이다. 개인 조직은 이메일당 하나라 개인 구독 토큰은 항상
-    /// 주인이 하나로 정해지고, 좌석형 조직이 둘 이상이면 가릴 수 없어 nil이다(모호하면 손대지 않는다).
+    /// 활성 프로필 저장본의 조직 종류와 같다(`liveSecret(_:reattributedTo:)`), 그리고 같은 이메일의 다른
+    /// 프로필 중 그 토큰의 주인**일 수 있는** 것이 없다(`liveToken(_:couldBelongTo:)`). 개인 조직은
+    /// 이메일당 하나라 개인 구독 토큰은 항상 주인이 하나로 정해지고, 좌석형 조직이 둘 이상이면 가릴 수
+    /// 없어 nil이다(모호하면 손대지 않는다). 다른 프로필의 저장본이 빈 토큰이거나 섞여 있거나 조직 종류를
+    /// 모르면 주인일 수 있는 것으로 센다 — 건강한 저장본만 세면 모호한데도 활성 하나로 좁혀진다(리뷰 2회차 P2-3).
     /// 신원은 활성 프로필 저장본의 oauthAccount를 쓴다 — 라이브의 것은 되돌려진 옛 조직이다.
     private func reattributedToActive(provider: Provider, io: any ProviderConfigIO,
                                       live: Data, email: String) -> (id: UUID, data: Data)? {
         guard let activeID = store.file.activeByProvider[provider],
-              store.file.accounts.first(where: { $0.id == activeID })?.emailAddress == email
+              store.file.accounts.first(where: { $0.id == activeID })?.emailAddress == email,
+              FileManager.default.fileExists(atPath: env.secretFile(for: activeID).path),
+              let activeStored = try? store.secretData(for: activeID),
+              let repaired = io.liveSecret(live, reattributedTo: activeStored)
         else { return nil }
-        var owners: [(id: UUID, data: Data)] = []
-        for p in store.file.accounts where p.provider == provider && p.emailAddress == email {
-            // stat 게이트 — 구버전 Keychain 폴백(승인창)은 타지 않는다
-            guard FileManager.default.fileExists(atPath: env.secretFile(for: p.id).path),
-                  let stored = try? store.secretData(for: p.id),
-                  let repaired = io.liveSecret(live, reattributedTo: stored) else { continue }
-            owners.append((p.id, repaired))
+        for p in store.file.accounts
+        where p.provider == provider && p.emailAddress == email && p.id != activeID {
+            // stat 게이트 — 구버전 Keychain 폴백(승인창)은 타지 않는다. 저장본이 없으면 모른다(nil).
+            let stored = FileManager.default.fileExists(atPath: env.secretFile(for: p.id).path)
+                ? try? store.secretData(for: p.id) : nil
+            if io.liveToken(live, couldBelongTo: stored) { return nil }
         }
-        guard owners.count == 1, let owner = owners.first, owner.id == activeID else { return nil }
-        return owner
+        return (activeID, repaired)
     }
 
     /// 라이브 자격증명을 프로필 스냅샷으로 저장한다. refresh 토큰이 **다른 값으로 교체**됐으면
@@ -271,6 +277,7 @@ public final class Switcher: @unchecked Sendable {
         //   게이지 refresh의 활성 fresh-read 가드 + 전환 진입 시 codexUsageTask 정지·완료대기)가 닫는다.
         try store.withCredentialLock(id) {
             guard let target = try store.secretData(for: id) else { throw SwitcherError.noStoredSecret }
+            guard !io.secretIsMixed(target) else { throw SwitcherError.mixedSnapshot }
 
             // 1. 라이브 최신 토큰 되저장 (CLI가 refresh했을 수 있으므로)
             let before = try io.readLiveSecretData()

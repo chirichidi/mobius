@@ -21,12 +21,17 @@ public struct RefreshedTokens: Equatable, Sendable {
     /// claude 2.1.281도 같은 필드를 `tokenAccount.organizationUuid`로 읽는다(바이너리 실측).
     /// 저장 스냅샷이 **남의 조직 토큰**을 들고 있었는지 추가 호출 없이 가려내는 근거다(실패 기록 24).
     public let organizationUuid: String?
+    /// 이 토큰의 계정 이메일(응답의 `account.email_address`). 없으면 nil. 한 회사 조직에는 여러 이메일이
+    /// 속하므로 조직 UUID만으로는 계정을 가르지 못한다 — 같이 대조한다(리뷰 2회차 P2-4).
+    public let accountEmail: String?
     public init(accessToken: String, refreshToken: String, expiresAtMs: Int,
-                refreshTokenExpiresAtMs: Int?, scopes: [String]?, organizationUuid: String? = nil) {
+                refreshTokenExpiresAtMs: Int?, scopes: [String]?, organizationUuid: String? = nil,
+                accountEmail: String? = nil) {
         self.accessToken = accessToken; self.refreshToken = refreshToken
         self.expiresAtMs = expiresAtMs; self.refreshTokenExpiresAtMs = refreshTokenExpiresAtMs
         self.scopes = scopes
         self.organizationUuid = organizationUuid
+        self.accountEmail = accountEmail
     }
 }
 
@@ -98,9 +103,11 @@ public struct OAuthTokenRefresher: TokenRefresher {
                 .split(separator: " ").map(String.init)
             let org = ((obj["organization"] as? [String: Any])?["uuid"] as? String)
                 .flatMap { $0.isEmpty ? nil : $0 }
+            let email = ((obj["account"] as? [String: Any])?["email_address"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
             return RefreshedTokens(accessToken: at, refreshToken: rt, expiresAtMs: expiresAtMs,
                                    refreshTokenExpiresAtMs: rteMs, scopes: scopes,
-                                   organizationUuid: org)
+                                   organizationUuid: org, accountEmail: email)
         }
         // invalid_grant = refresh 토큰 폐기 → 확정 죽음. 그 외 오류는 오탐 방지 위해 transient.
         if (400...499).contains(status) {

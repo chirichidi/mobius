@@ -118,7 +118,13 @@ struct Switch: ParsableCommand {
                 + "`claude`에서 그 계정으로 직접 로그인한 뒤 "
                 + "`mobius capture <다른 닉네임>`으로 이름을 바꾸세요.")
         }
-        try ctx.switcher.switchTo(target.id)
+        do {
+            try ctx.switcher.switchTo(target.id)
+        } catch SwitcherError.mixedSnapshot {
+            // 실패 기록 24 — 설치하면 이 카드와 다른 조직으로 로그인된다
+            throw ValidationError("'\(target.nickname)'에 다른 조직의 로그인이 저장돼 있어 전환하지 않았습니다. "
+                + "`claude`에서 /login 으로 이 조직에 로그인한 뒤 `mobius capture \(target.nickname)` 하세요.")
+        }
         // 사용자의 의지로 전환 — 앱 onTick의 primary 자동 복귀 대상이 아니다
         try ctx.store.setAutoSwitchedFromPrimary(false, provider: target.provider)
         MobiusNotification.postAccountsChanged()

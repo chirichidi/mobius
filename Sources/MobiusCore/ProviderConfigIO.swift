@@ -68,6 +68,15 @@ public protocol ProviderConfigIO: Sendable {
     /// 저장본)와 같은 계정의 것으로 보이면, 토큰은 라이브의 것을 쓰고 신원은 `stored`의 것을 쓴 secret을
     /// 돌려준다. 아니면 nil. Claude에서 신원만 옛 조직으로 되돌려진 경우를 보정하는 데 쓴다(실패 기록 24).
     func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data?
+
+    /// 라이브 토큰이 `stored`(어느 프로필의 저장본, 없으면 nil)를 가진 계정의 것**일 수 있는가**.
+    /// 보정할 주인이 하나뿐인지 셀 때 쓴다 — 저장본이 빈 토큰이거나 섞여 있거나 조직 종류를 모르면
+    /// "모른다"이므로 true다. 모호함은 저장본의 건강 상태가 아니라 주인일 수 있는 프로필 수로 정한다.
+    func liveToken(_ live: Data, couldBelongTo stored: Data?) -> Bool
+
+    /// 저장 secret 자체가 서로 다른 계정의 토큰과 신원을 섞어 들고 있는가. 전환은 이런 secret을 라이브에
+    /// 설치하지 않는다 — 설치하면 사용자가 고른 카드와 다른 조직으로 로그인된다.
+    func secretIsMixed(_ data: Data) -> Bool
 }
 
 extension ProviderConfigIO {
@@ -76,6 +85,12 @@ extension ProviderConfigIO {
 
     /// 기본: 보정 없음 — 신원이 토큰과 한 파일에 있는 프로바이더는 어긋날 일이 없다.
     public func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data? { nil }
+
+    /// 기본: 모른다(true) — 보정을 쓰지 않는 프로바이더에서는 불리지 않는다.
+    public func liveToken(_ live: Data, couldBelongTo stored: Data?) -> Bool { true }
+
+    /// 기본: 섞일 수 없다.
+    public func secretIsMixed(_ data: Data) -> Bool { false }
 
     public func readStableLiveSecretData() async -> (data: Data, email: String)? {
         await readStableLiveSecretData(gap: .milliseconds(700))

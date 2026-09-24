@@ -427,6 +427,38 @@ final class SwitcherTests: XCTestCase {
         XCTAssertEqual(try storedRefresh(other.id), "B0")
     }
 
+    /// 리뷰 2회차 P2-3: 다른 좌석형 프로필의 저장본이 빈 토큰이어도 주인 후보로 센다 — 건강한 저장본만
+    /// 세면 Team B의 새 토큰이 활성 Team A에 붙어 Team A의 계보가 덮인다.
+    func testReattributionCountsOwnersWhoseStoredSnapshotIsUnhealthy() async throws {
+        let teamB = #"{"emailAddress":"t@x.com","organizationName":"other-team","organizationType":"claude_team","seatTier":"team_tier_1","organizationUuid":"org-team-b"}"#
+        let (team, _) = try setUpTwoOrganizations()
+        let other = try store.upsertProfile(nickname: "team-b", snapshot: orgSnap(token: "team", refresh: "", account: teamB))
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+        // Team B에 새로 로그인한 뒤 oauthAccount만 개인 Max로 되돌려진 상태
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "B1", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(try storedRefresh(team.id), "T0", "Team A의 계보를 덮으면 안 된다")
+        XCTAssertNil(try storedRefresh(other.id))
+    }
+
+    /// 리뷰 2회차 P3-2: 섞인 저장본은 라이브에 설치하지 않는다 — 사용자가 고른 카드와 다른 조직으로 로그인된다.
+    func testSwitchRefusesMixedTargetSnapshot() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try store.setSecret(orgSnap(token: "team", refresh: "X0", account: Self.maxAccount), for: max.id)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+
+        XCTAssertThrowsError(try switcher.switchTo(max.id)) { error in
+            XCTAssertEqual(error as? SwitcherError, .mixedSnapshot)
+        }
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-team"))
+    }
+
     /// 전환 직전 되저장도 같은 판정을 탄다 — 떠나는 프로필에 남의 조직 토큰을 박지 않고, 전환 자체는 진행한다.
     func testSwitchSkipsResaveOfMismatchedLiveButStillSwitches() throws {
         let (team, max) = try setUpTwoOrganizations()

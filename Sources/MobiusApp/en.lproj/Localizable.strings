@@ -141,6 +141,8 @@
 "%@ 계정의 인증이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요." = "Authentication for %@ has expired. Press 'Sign in again' on its card.";
 "%@ 계정의 로그인이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요." = "%@'s login has expired. Press 'Sign in again' on its card.";
 "%@ 계정에 다른 조직의 로그인이 저장돼 있었어요. 카드의 '다시 로그인'으로 이 조직에 다시 로그인해 주세요." = "%@ had another organization's login saved in it. Use 'Sign in again' on its card to sign in to this organization.";
+"%@ 계정이 다른 카드와 같은 로그인을 나눠 쓰고 있었어요. 카드의 '다시 로그인'으로 이 조직에 다시 로그인해 주세요." = "%@ was sharing the same login with another card. Use 'Sign in again' on its card to sign in to this organization.";
+"이 카드에는 다른 조직의 로그인이 저장돼 있어 전환하지 않았어요. 카드의 '다시 로그인'을 눌러 주세요." = "This card has another organization's login saved in it, so Mobius did not switch. Press 'Sign in again' on the card.";
 "%@ 계정의 로그인이 만료돼 전환을 건너뛰었어요. '다시 로그인'을 눌러주세요." = "%@'s login has expired, so the switch was skipped. Press 'Sign in again'.";
 "인증 확인 필요" = "Check sign-in";
 "%@ 계정의 사용량 조회가 계속 거부되고 있어요. 로그인이 만료됐을 수 있으니 카드의 '다시 로그인'을 눌러주세요." = "Usage lookups for %@ keep being rejected. Its login may have expired — press 'Sign in again' on its card.";

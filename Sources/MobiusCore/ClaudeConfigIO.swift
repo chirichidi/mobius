@@ -5,7 +5,8 @@ public enum ClaudeConfigError: Error { case malformedClaudeJSON }
 /// 라이브 스냅샷(토큰 + oauthAccount)을 프로필에 저장해도 되는지의 판정.
 public enum LiveSnapshotVerdict: Equatable, Sendable {
     case storable
-    /// 로그아웃·재로그인 도중이라 쓸 수 있는 refresh 토큰이 없다
+    /// 쓸 수 있는 refresh 토큰이 없다 — invalid_grant 뒤 비워진 토큰, 재로그인 준비 단계가 남긴
+    /// `mcpOAuth`만의 blob, 빈 객체 `{}`
     case loggedOut
     /// 토큰과 oauthAccount가 서로 다른 조직(좌석형 ↔ 개인 구독)을 가리킨다
     case organizationMismatch
@@ -253,6 +254,26 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return try? JSONEncoder().encode(CredentialsSnapshot(keychainBlob: liveSnap.keychainBlob,
                                                              credentialsFileData: liveSnap.credentialsFileData,
                                                              oauthAccountJSON: storedSnap.oauthAccountJSON))
+    }
+
+    /// 저장본의 oauthAccount가 가리키는 조직 종류가 라이브 토큰 종류와 같거나 **모르면** true.
+    /// 저장본의 토큰 상태(빈 토큰, 섞임)는 보지 않는다 — 신원은 그 프로필이 어느 조직인지를 말할 뿐이다.
+    public func liveToken(_ live: Data, couldBelongTo stored: Data?) -> Bool {
+        let decoder = JSONDecoder()
+        guard let liveSnap = try? decoder.decode(CredentialsSnapshot.self, from: live),
+              let tokenSeat = CredentialBlob.isSeatSubscription(from: liveSnap.keychainBlob),
+              let stored,
+              let storedSnap = try? decoder.decode(CredentialsSnapshot.self, from: stored),
+              let json = storedSnap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              let accountSeat = Self.isSeatOrganization(oauthBlock: block)
+        else { return true }
+        return accountSeat == tokenSeat
+    }
+
+    public func secretIsMixed(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .organizationMismatch
     }
 
     /// Claude secret은 CredentialsSnapshot JSON이다 — 디코드되면 Claude 형태.

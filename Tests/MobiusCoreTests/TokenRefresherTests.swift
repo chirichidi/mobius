@@ -48,6 +48,7 @@ final class TokenRefresherTests: XCTestCase {
         let data = Data(#"{"access_token":"A","refresh_token":"R","expires_in":3600,"account":{"uuid":"acct-1","email_address":"t@x.com"},"organization":{"uuid":"org-team"}}"#.utf8)
         let t = try OAuthTokenRefresher.parseResponse(status: 200, data: data, now: Date())
         XCTAssertEqual(t.organizationUuid, "org-team")
+        XCTAssertEqual(t.accountEmail, "t@x.com")
     }
 
     func testParseInvalidGrantIsDeath() {
