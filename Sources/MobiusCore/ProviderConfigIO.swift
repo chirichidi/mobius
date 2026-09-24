@@ -57,9 +57,18 @@ public protocol ProviderConfigIO: Sendable {
     /// secret 파일은 그대로 남으므로, secret 형태가 진짜 provider의 authority다 —
     /// Switcher.healMisassignedProviders가 소실된 provider를 이걸로 재도출한다.
     func recognizesSecret(_ data: Data) -> Bool
+
+    /// 라이브에서 읽은 secret을 프로필에 저장해도 되는가 — 토큰과 신원이 **같은 로그인**의 것이고,
+    /// 로그아웃·재로그인 도중의 빈 상태가 아닌가. false면 되저장·reconcile·adopt가 이번 판정을
+    /// 미룬다(다음 틱에 다시 본다). Claude는 토큰(Keychain)과 신원(~/.claude.json)을 따로 읽어
+    /// 짝짓기 때문에 필요하다(실패 기록 24). 신원이 토큰 안에 있는 프로바이더는 기본 구현으로 충분하다.
+    func canStoreLiveSecret(_ data: Data) -> Bool
 }
 
 extension ProviderConfigIO {
+    /// 기본: 항상 저장 가능 — Codex auth.json은 신원(JWT)이 토큰과 한 파일에 있어 어긋날 수 없다.
+    public func canStoreLiveSecret(_ data: Data) -> Bool { true }
+
     public func readStableLiveSecretData() async -> (data: Data, email: String)? {
         await readStableLiveSecretData(gap: .milliseconds(700))
     }

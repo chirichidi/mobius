@@ -42,6 +42,16 @@ final class ReauthClearanceTests: XCTestCase {
                                                            next: blob(refresh: "")))
     }
 
+    func testEmptyPreviousFollowedByRealTokenClears() {
+        // 반대 방향은 다르다: claude가 로그아웃·재로그인 도중 토큰만 비운 blob을 되저장한 프로필에
+        // 비지 않은 토큰이 오면, 그건 새 로그인에서만 나온다(빈 토큰으로는 refresh할 수 없다).
+        // 실측 2026-09-24: CLI에서 다시 로그인해 멀쩡한데 "재로그인 필요"가 남아 있었다(실패 기록 24).
+        XCTAssertTrue(ReauthClearance.refreshTokenRotated(previous: blob(refresh: ""),
+                                                          next: blob(refresh: "R1")))
+        XCTAssertFalse(ReauthClearance.refreshTokenRotated(previous: blob(refresh: ""),
+                                                           next: blob(refresh: "")))
+    }
+
     func testUnparsableSecretDoesNotClear() {
         // Claude 형식이 아닌 secret(예: Codex auth.json)은 판정 대상이 아니다.
         XCTAssertFalse(ReauthClearance.refreshTokenRotated(previous: Data("not json".utf8),

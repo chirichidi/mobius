@@ -263,6 +263,8 @@ final class AppState: ObservableObject {
         // 조직으로 로그인했을 때 이 프로필이 이메일만으로 잡혀 덮어써지지 않게(실패 기록 23).
         // 비밀 파일이 있는 계정만 읽으므로 Keychain 승인창은 뜨지 않는다.
         _ = try? switcher.backfillOrganizationUUIDs()
+        // 등급 표시 규칙이 바뀌어도 기존 프로필은 등록 때의 문자열을 들고 있다 — 스냅샷에서 다시 계산.
+        _ = try? switcher.refreshTierLabels()
         self.file = store.file
         self.lastError = initError
         // init에서의 직접 대입은 didSet이 불리지 않는다 — TTL 기준점을 수동 기록
@@ -365,6 +367,10 @@ final class AppState: ObservableObject {
                         reauthChanged = true
                         notify(title: loc("재로그인 필요"),
                                body: loc("%@ 계정의 인증이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요.", profile.nickname))
+                        continue
+                    case .organizationMismatch:
+                        reauthChanged = true
+                        notifyOrganizationMismatch(profile.nickname)
                         continue
                     case .locallyDead, .noRefreshToken:
                         // **로컬로 판정 가능**한 죽음 — 매 팝오버 함께 도는 validateFallbacksLocally가
@@ -571,9 +577,20 @@ final class AppState: ObservableObject {
             notify(title: loc("재로그인 필요"),
                    body: loc("%@ 계정의 로그인이 만료돼 전환을 건너뛰었어요. '다시 로그인'을 눌러주세요.", name))
             return false
+        case .organizationMismatch:
+            // 전환하면 이 카드와 다른 조직으로 로그인된다 — 죽은 계정과 같이 전환을 취소한다.
+            notifyOrganizationMismatch(store.file.accounts.first { $0.id == id }?.nickname ?? "?")
+            return false
         default:
             return true   // refreshedAlive / transient / notFallback → 전환 진행
         }
+    }
+
+    /// 저장 스냅샷이 다른 조직의 토큰이었음이 refresh 응답으로 드러났을 때(실패 기록 24).
+    /// "만료"와 문구를 나눈다 — 사용자가 할 일은 같지만(다시 로그인), 로그인할 **조직**을 골라야 한다.
+    private func notifyOrganizationMismatch(_ name: String) {
+        notify(title: loc("재로그인 필요"),
+               body: loc("%@ 계정에 다른 조직의 로그인이 저장돼 있었어요. 카드의 '다시 로그인'으로 이 조직에 다시 로그인해 주세요.", name))
     }
 
     /// 만료 임박한 폴백의 refresh 토큰을 미리 갱신한다 — refresh가 새 refresh 토큰(연장된
@@ -598,6 +615,9 @@ final class AppState: ObservableObject {
             switch r {
             case .refreshedAlive:
                 changed = true
+            case .organizationMismatch:
+                changed = true
+                notifyOrganizationMismatch(p.nickname)
             case .dead, .locallyDead, .noRefreshToken, .storeFailed:
                 changed = true
                 notify(title: loc("재로그인 필요"),

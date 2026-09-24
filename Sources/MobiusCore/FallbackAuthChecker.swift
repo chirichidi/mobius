@@ -21,6 +21,10 @@ public enum FallbackCheckResult: Equatable, Sendable {
     case dead            // invalid_grant → 재로그인 필요
     case transient       // 네트워크/5xx → 마킹 안 함(재시도)
     case storeFailed     // refresh 성공했으나 저장 실패 → 새 토큰 유실 → 재로그인 필요로 마킹
+    /// refresh 응답의 조직이 프로필의 조직과 다르다 — 저장 스냅샷이 **남의 조직 토큰**을 들고
+    /// 있었다(실패 기록 24). 회전본은 저장하지 않고 재로그인 필요로 마킹한다: 그 토큰을 이
+    /// 프로필에 두면 카드가 다른 조직의 사용량을 보여 주고, 전환하면 다른 조직으로 로그인된다.
+    case organizationMismatch
 }
 
 public final class FallbackAuthChecker: @unchecked Sendable {
@@ -97,16 +101,31 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         do {
             let tokens = try await refresher.refresh(refreshToken: rt, scopes: scopes, now: now)
             // 여기 도달 = old refresh 토큰은 서버에서 소비됨. 새 토큰을 반드시 저장해야 한다.
+            // 단 응답이 말하는 조직이 이 프로필의 조직과 다르면 저장할 자리가 아니다 — 추가 호출 없이
+            // 오염을 잡는 유일한 지점이고, 같은 종류의 두 조직(Team과 다른 Team)도 여기서는 갈린다.
+            let profileOrg = store.file.accounts.first(where: { $0.id == id })?.organizationUuid ?? ""
+            if let tokenOrg = tokens.organizationUuid, !profileOrg.isEmpty, tokenOrg != profileOrg {
+                try? store.setNeedsReauth(id, true); return .organizationMismatch
+            }
             guard let newSnap = snap.applyingRefreshedTokens(tokens) else {
                 try? store.setNeedsReauth(id, true); return .storeFailed
             }
-            do {
-                try store.setSecret(newSnap, for: id)     // 원자 저장(temp→rename)
-                try? store.setNeedsReauth(id, false)      // 살아있음 → 딱지 해제
-                return .refreshedAlive
-            } catch {
-                // 새 토큰 유실 → old RT는 이미 죽음 → 재로그인이 복구 경로
-                try? store.setNeedsReauth(id, true); return .storeFailed
+            // ★ 저장은 credential lock 안에서 다시 확인한 뒤에 한다(Codex 경로와 같은 규칙).
+            //   HTTP 왕복 사이에 (1) 재로그인·되저장이 이 프로필에 새 스냅샷을 썼으면 옛 계보의
+            //   회전본으로 덮지 않고, (2) 이 계정이 활성이 됐으면 라이브(~/.claude)가 진실이므로
+            //   손대지 않는다. 앱 안의 전환은 preflight가 진행 중 refresh에 합류해 여기까지 오지
+            //   않지만, CLI 전환은 다른 프로세스라 합류가 없다. 둘 다 판정 보류(transient)다.
+            return store.withCredentialLock(id) { () -> FallbackCheckResult in
+                guard (try? store.secret(for: id)) == snap,
+                      store.file.activeByProvider[.claude] != id else { return .transient }
+                do {
+                    try store.setSecret(newSnap, for: id)     // 원자 저장(temp→rename)
+                    try? store.setNeedsReauth(id, false)      // 살아있음 → 딱지 해제
+                    return .refreshedAlive
+                } catch {
+                    // 새 토큰 유실 → old RT는 이미 죽음 → 재로그인이 복구 경로
+                    try? store.setNeedsReauth(id, true); return .storeFailed
+                }
             }
         } catch TokenRefresherError.invalidGrant {
             try? store.setNeedsReauth(id, true); return .dead

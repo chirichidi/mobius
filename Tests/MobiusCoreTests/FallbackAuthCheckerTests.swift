@@ -190,4 +190,78 @@ final class FallbackAuthCheckerTests: XCTestCase {
         XCTAssertEqual(mock.callCount, 2)              // 게이트 해제 — 완료 후엔 각자 refresh
         XCTAssertEqual(mock.lastRefreshToken, "NRT")   // ★ 회전된 토큰을 다시 읽어서 사용
     }
+
+    // MARK: 조직 대조와 저장 직전 재확인 (실패 기록 24)
+
+    private func orgFallback(org: String) throws -> AccountProfile {
+        let oauth = #"{"accessToken":"AT","refreshToken":"ORT","expiresAt":1,"refreshTokenExpiresAt":\#(futureRteMs),"scopes":["user:inference"],"subscriptionType":"team"}"#
+        let blob = Data(#"{"claudeAiOauth":\#(oauth)}"#.utf8)
+        return try store.upsertProfile(nickname: "team", snapshot: CredentialsSnapshot(
+            keychainBlob: blob, credentialsFileData: blob,
+            oauthAccountJSON: Data(#"{"emailAddress":"t@x.com","organizationName":"acme","organizationUuid":"\#(org)"}"#.utf8)))
+    }
+
+    private func tokens(org: String?) -> RefreshedTokens {
+        RefreshedTokens(accessToken: "NAT", refreshToken: "NRT", expiresAtMs: 123,
+                        refreshTokenExpiresAtMs: futureRteMs + 1, scopes: nil, organizationUuid: org)
+    }
+
+    /// refresh 응답이 다른 조직의 토큰이라고 말하면 — 저장 스냅샷이 남의 조직 토큰을 들고 있었다.
+    /// 회전본을 이 프로필에 넣지 않고 재로그인 필요로 마킹한다. 같은 종류의 두 조직(Team과 다른
+    /// Team)도 여기서 갈린다(라이브 판정은 좌석형/개인 구독만 본다).
+    func testRefreshFromAnotherOrganizationIsNotStored() async throws {
+        let team = try orgFallback(org: "org-team")
+        let r = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(tokens(org: "org-other"))))
+            .check(team.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(r, .organizationMismatch)
+        XCTAssertTrue(reauth(team.id))
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: team.id)).keychainBlob), "ORT")
+    }
+
+    func testRefreshFromSameOrganizationOrUnknownIsStored() async throws {
+        let team = try orgFallback(org: "org-team")
+        let same = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(tokens(org: "org-team"))))
+            .check(team.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(same, .refreshedAlive)
+        // 응답에 조직이 없으면(구버전 서버 응답) 예전처럼 저장한다 — 모르면 막지 않는다.
+        let unknown = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(tokens(org: nil))))
+            .check(fallback.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(unknown, .refreshedAlive)
+    }
+
+    /// HTTP 왕복 사이에 재로그인이 이 프로필에 새 스냅샷을 썼으면, 옛 계보의 회전본으로 덮지 않는다.
+    func testRotationDoesNotOverwriteSnapshotSavedDuringRefresh() async throws {
+        let gated = GatedRefresher(tokens: tokens(org: nil))
+        let checker = FallbackAuthChecker(store: store, refresher: gated)
+        let id = fallback.id, activeID = active.id, ts = now
+        let entered = expectation(description: "refresh entered")
+        gated.onEnter = { entered.fulfill() }
+        let task = Task { await checker.check(id, activeAccountID: activeID, now: ts) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        try store.setSecret(snap(email: "f@x.com", rt: "RELOGIN", rteMs: futureRteMs), for: fallback.id)
+        gated.release()
+
+        let r = await task.value
+        XCTAssertEqual(r, .transient)
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: fallback.id)).keychainBlob), "RELOGIN")
+    }
+
+    /// HTTP 왕복 사이에 이 계정이 활성이 됐으면(CLI 전환 등) 라이브가 진실이다 — 저장하지 않는다.
+    func testRotationIsNotStoredWhenAccountBecameActive() async throws {
+        let gated = GatedRefresher(tokens: tokens(org: nil))
+        let checker = FallbackAuthChecker(store: store, refresher: gated)
+        let id = fallback.id, activeID = active.id, ts = now
+        let entered = expectation(description: "refresh entered")
+        gated.onEnter = { entered.fulfill() }
+        let task = Task { await checker.check(id, activeAccountID: activeID, now: ts) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        try store.setActive(fallback.id)
+        gated.release()
+
+        let r = await task.value
+        XCTAssertEqual(r, .transient)
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: fallback.id)).keychainBlob), "FRT")
+    }
 }

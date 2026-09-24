@@ -195,6 +195,11 @@ Usage gauges are fetched only when the popover opens (4-minute cache) — never 
   then one email shared a single profile, so only the organization you signed into last is
   still there. The backfill only makes the surviving profiles consistent, so add the missing
   organizations again through "Add account".
+  If on v0.5.4 two cards showed the same usage, or every switch asked you to sign in again,
+  one organization's token had been saved into the other organization's card. Mobius now
+  refuses to save a login whose token and account info point at different organizations, and
+  a card that is already mixed up is marked "Sign in again" when its token is next refreshed.
+  Use "Sign in again" on that card to sign in to its organization.
 - **Adding a Codex account**: in a terminal, run `codex logout` then `codex login`
   with the account you want to add — Mobius registers it automatically within seconds
   (your current account is already saved as a card, so you can switch back anytime).

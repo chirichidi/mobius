@@ -2,6 +2,15 @@ import Foundation
 
 public enum ClaudeConfigError: Error { case malformedClaudeJSON }
 
+/// 라이브 스냅샷(토큰 + oauthAccount)을 프로필에 저장해도 되는지의 판정.
+public enum LiveSnapshotVerdict: Equatable, Sendable {
+    case storable
+    /// 로그아웃·재로그인 도중이라 쓸 수 있는 refresh 토큰이 없다
+    case loggedOut
+    /// 토큰과 oauthAccount가 서로 다른 조직(좌석형 ↔ 개인 구독)을 가리킨다
+    case organizationMismatch
+}
+
 /// Claude Code 자격증명 3곳(Keychain / .credentials.json / ~/.claude.json oauthAccount)의 읽기·쓰기.
 public struct ClaudeConfigIO: Sendable {
     let env: MobiusEnvironment
@@ -143,14 +152,61 @@ extension ClaudeConfigIO: ProviderConfigIO {
     /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로.
     /// Team 워크스페이스의 oauthAccount는 organizationType·organizationRateLimitTier가 **둘 다 null**이고
     /// `seatTier: "team_tier_1"`만 온다(실측 2026-09-11) — 그래서 seatTier까지 폴백한다("Team Tier 1").
+    /// ★ 좌석형 조직은 organizationType을 **먼저** 본다. 2026-09-24 실측에서 Team의
+    ///   organizationRateLimitTier는 `"default_raven"`으로 채워져 와서, 등급 칸에 내부 코드명
+    ///   "Raven"이 떴다. 조직 한도 등급은 개인 구독(Max 5x·20x)에서만 사람이 읽을 이름이다.
     static func tierDescription(from block: [String: Any]) -> String {
+        switch block["organizationType"] as? String {
+        case "claude_team": return "Team"
+        case "claude_enterprise": return "Enterprise"
+        default: break
+        }
         let tier = (block["organizationRateLimitTier"] as? String)
             ?? (block["organizationType"] as? String)
             ?? (block["seatTier"] as? String) ?? ""
         return tier.replacingOccurrences(of: "default_", with: "")
             .replacingOccurrences(of: "claude_", with: "")
             .replacingOccurrences(of: "_", with: " ")
-            .capitalized
+            .split(separator: " ")
+            // `capitalized`는 "20x"를 "20X"로 만든다 — 글자로 시작하는 낱말만 첫 글자를 올린다.
+            .map { $0.first?.isLetter == true ? $0.prefix(1).uppercased() + $0.dropFirst() : String($0) }
+            .joined(separator: " ")
+    }
+
+    /// oauthAccount 블록이 좌석형 조직(Team·Enterprise)을 가리키는가. 개인 구독이면 false, 모르면 nil.
+    /// ★ `seatTier`를 먼저 본다 — claude 2.1.281은 로그인 때 organizationUuid와 seatTier를 **한 번의
+    ///   쓰기**로 갱신하지만 organizationType은 나중(bootstrap)에야 채운다(바이너리 실측). 조직과
+    ///   같은 시점에 바뀌는 신호가 seatTier다. seatTier가 없거나 null이면 organizationType으로 폴백한다.
+    static func isSeatOrganization(oauthBlock block: [String: Any]) -> Bool? {
+        if let seat = block["seatTier"] as? String, !seat.isEmpty { return true }
+        switch block["organizationType"] as? String {
+        case "claude_team", "claude_enterprise": return true
+        case "claude_max", "claude_pro": return false
+        default: return nil
+        }
+    }
+
+    /// 라이브 스냅샷을 프로필에 저장해도 되는가 — 토큰(Keychain)과 신원(~/.claude.json)이
+    /// **같은 로그인**의 것인가를 네트워크 없이 판정한다(실패 기록 24).
+    ///
+    /// 두 곳은 쓰는 주체와 시점이 다르다. claude는 refresh 때 토큰만 쓰고 oauthAccount의
+    /// organizationUuid는 건드리지 않으며, 세션 시작 때의 bootstrap은 **그 프로세스가 쥔 토큰**의
+    /// 조직으로 oauthAccount를 다시 쓴다(2.1.281 실측). 전환 직후 두 곳이 서로 다른 조직을 가리키는
+    /// 순간이 생기고, 이 둘을 짝지어 저장하면 조직 A의 토큰이 조직 B 프로필에 들어간다. 그 뒤로는
+    /// 두 프로필이 한 토큰 계보를 나눠 가져 한쪽이 회전할 때마다 다른 쪽이 invalid_grant가 된다.
+    ///
+    /// 판정은 좌석형(Team·Enterprise)인지 개인 구독(Max·Pro)인지만 본다. 같은 이메일의 개인 조직은
+    /// 하나뿐이라 회사 조직과 개인 구독이 섞이는 경우를 정확히 잡는다. 같은 종류의 두 조직(Team과
+    /// 다른 Team)은 이 신호로 가를 수 없다 — 그건 폴백 refresh 응답의 조직 UUID가 잡는다
+    /// (`FallbackAuthChecker`). Pro→Max처럼 개인 구독 안에서 요금제가 바뀌어도 오판하지 않는다.
+    public static func liveSnapshotVerdict(_ snap: CredentialsSnapshot) -> LiveSnapshotVerdict {
+        if CredentialBlob.lacksLogin(snap.keychainBlob) { return .loggedOut }
+        guard let tokenSeat = CredentialBlob.isSeatSubscription(from: snap.keychainBlob),
+              let json = snap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              let accountSeat = isSeatOrganization(oauthBlock: block)
+        else { return .storable }   // 한쪽이라도 모르면 막지 않는다(구버전 claude·테스트 blob)
+        return tokenSeat == accountSeat ? .storable : .organizationMismatch
     }
 
     public func readStableLiveSecretData(gap: Duration) async -> (data: Data, email: String)? {
@@ -161,6 +217,11 @@ extension ClaudeConfigIO: ProviderConfigIO {
 
     public func writeLiveSecretData(_ data: Data) throws {
         try writeLiveSnapshot(try JSONDecoder().decode(CredentialsSnapshot.self, from: data))
+    }
+
+    public func canStoreLiveSecret(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .storable
     }
 
     /// Claude secret은 CredentialsSnapshot JSON이다 — 디코드되면 Claude 형태.

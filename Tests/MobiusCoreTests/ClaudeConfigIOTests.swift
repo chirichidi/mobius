@@ -105,4 +105,77 @@ final class ClaudeConfigIOTests: XCTestCase {
                        "w@x.com")
         XCTAssertEqual(try io.liveEmail(), "w@x.com")
     }
+
+    // MARK: 라이브 스냅샷 저장 판정 (실패 기록 24)
+    // 실측 2026-09-24의 두 oauthAccount 모양 — 같은 이메일·같은 accountUuid, 조직만 다르다.
+
+    static let teamAccount = #"{"emailAddress":"p@x.com","organizationName":"acme-team","organizationType":"claude_team","organizationRateLimitTier":"default_raven","userRateLimitTier":"default_claude_max_5x","seatTier":"team_tier_1","organizationUuid":"org-team"}"#
+    static let maxAccount = #"{"emailAddress":"p@x.com","organizationName":"p@x.com's Organization","organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x","userRateLimitTier":null,"seatTier":null,"organizationUuid":"org-max"}"#
+
+    func liveSnap(subscription: String?, refresh: String? = "R", account: String) -> CredentialsSnapshot {
+        var oauth: [String: Any] = ["accessToken": "A", "expiresAt": 1]
+        if let refresh { oauth["refreshToken"] = refresh }
+        if let subscription { oauth["subscriptionType"] = subscription }
+        let blob = try! JSONSerialization.data(withJSONObject: ["claudeAiOauth": oauth, "mcpOAuth": [:]])
+        return CredentialsSnapshot(keychainBlob: blob, credentialsFileData: blob,
+                                   oauthAccountJSON: Data(account.utf8))
+    }
+
+    func testVerdictAcceptsMatchingTokenAndAccount() {
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: Self.teamAccount)), .storable)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "max", account: Self.maxAccount)), .storable)
+    }
+
+    /// 사고의 모양 그대로: 개인 Max 프로필 자리(oauthAccount = Max)에 Team 토큰이 들어온 라이브.
+    /// 이걸 저장하면 두 카드가 같은 사용량을 보이고, 한쪽이 회전할 때마다 다른 쪽이 invalid_grant가 된다.
+    func testVerdictRejectsTokenFromOtherOrganizationKind() {
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: Self.maxAccount)),
+                       .organizationMismatch)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "max", account: Self.teamAccount)),
+                       .organizationMismatch)
+    }
+
+    /// seatTier가 organizationType보다 먼저다 — 로그인 때 organizationUuid와 함께 쓰이는 쪽이 seatTier다.
+    func testVerdictPrefersSeatTierOverOrganizationType() {
+        let staleType = #"{"emailAddress":"p@x.com","organizationType":"claude_max","seatTier":"team_tier_1","organizationUuid":"org-team"}"#
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: staleType)), .storable)
+    }
+
+    /// 개인 구독 안에서 요금제가 바뀌어도(Pro→Max) 막지 않는다 — claude는 refresh 때 blob의
+    /// subscriptionType을 이전 값 그대로 물려주므로 둘이 한동안 달라진다.
+    func testVerdictIgnoresPlanChangeWithinPersonalSubscription() {
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "pro", account: Self.maxAccount)), .storable)
+    }
+
+    /// 로그아웃·재로그인 도중의 모양 둘 — 토큰만 비운 blob, 로그인 항목을 통째로 지운 blob.
+    func testVerdictRejectsLoggedOutBlobs() {
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", refresh: "", account: Self.teamAccount)),
+                       .loggedOut)
+        let onlyMcp = Data(#"{"mcpOAuth":{"srv|1":{"accessToken":"m","refreshToken":"mr"}}}"#.utf8)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(CredentialsSnapshot(keychainBlob: onlyMcp, credentialsFileData: onlyMcp,
+                                                                              oauthAccountJSON: Data(Self.teamAccount.utf8))),
+                       .loggedOut)
+    }
+
+    /// 판정 근거가 없으면 막지 않는다 — 구버전 claude(subscriptionType·seatTier 없음)와 테스트 blob.
+    func testVerdictIsPermissiveWhenSignalsAreMissing() {
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: nil, account: Self.maxAccount)), .storable)
+        let bare = #"{"emailAddress":"p@x.com","organizationUuid":"org-x"}"#
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: bare)), .storable)
+        let opaque = Data(#"{"tok":"x"}"#.utf8)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(CredentialsSnapshot(keychainBlob: opaque, credentialsFileData: opaque,
+                                                                              oauthAccountJSON: Data(Self.maxAccount.utf8))),
+                       .storable)
+    }
+
+    /// Team의 organizationRateLimitTier는 내부 코드명("default_raven")으로 온다(실측) — 등급 칸엔 "Team".
+    func testTierDescriptionShowsTeamInsteadOfRateLimitCodename() throws {
+        func tier(_ json: String) throws -> String {
+            let block = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            return ClaudeConfigIO.tierDescription(from: block)
+        }
+        XCTAssertEqual(try tier(Self.teamAccount), "Team")
+        XCTAssertEqual(try tier(Self.maxAccount), "Max 20x")
+        XCTAssertEqual(try tier(#"{"organizationType":"claude_enterprise","organizationRateLimitTier":"default_x"}"#), "Enterprise")
+    }
 }

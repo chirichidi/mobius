@@ -103,14 +103,41 @@ public final class Switcher: @unchecked Sendable {
         return filled
     }
 
+    /// 조직을 이미 아는 Claude 프로필의 **등급 표시**를 저장 스냅샷에서 다시 계산한다.
+    /// 등급 문자열은 등록·재로그인 때만 정해지므로, 표시 규칙(`ClaudeConfigIO.tierDescription`)을
+    /// 고쳐도 기존 프로필은 옛 문자열("Raven", "Max 20X")을 계속 보여 준다. 스냅샷의 조직이 프로필의
+    /// 조직과 같을 때만, 빈 값이 아닐 때만 바꾼다 — backfill과 같은 stat 게이트(승인창 없음).
+    /// 반환: 등급을 바꾼 프로필 id. 앱 시작·CLI 변경 명령에서 backfill 직후 1회 호출.
+    @discardableResult
+    public func refreshTierLabels() throws -> [UUID] {
+        var changed: [UUID] = []
+        for account in store.file.accounts
+        where account.provider == .claude && !account.organizationUuid.isEmpty {
+            guard FileManager.default.fileExists(atPath: env.secretFile(for: account.id).path),
+                  let data = try? store.secretData(for: account.id),
+                  let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data),
+                  let identity = ClaudeConfigIO.identity(fromSnapshot: snap),
+                  identity.organizationUuid == account.organizationUuid,
+                  !identity.tierDescription.isEmpty,
+                  identity.tierDescription != account.tierDescription
+            else { continue }
+            try store.update(account.id) { $0.tierDescription = identity.tierDescription }
+            changed.append(account.id)
+        }
+        return changed
+    }
+
     /// 현재 라이브 상태를, (provider, 계정 열쇠)가 일치하는 프로필에 되저장한다.
     /// 반환: 되저장된 프로필 id (일치 프로필 없으면 nil).
     /// 사용자 전환(switchTo) 직전에 호출 — 라이브가 settled 상태이므로 단일 읽기로 충분하다.
     /// provider 기본값 없음 — 풀을 바꾸는 연산은 대상 풀을 항상 명시한다 (오라우팅 방지).
+    /// ★ 토큰과 신원이 어긋난 라이브는 되저장하지 않는다(`canStoreLiveSecret`, 실패 기록 24) —
+    ///   남의 조직 토큰을 떠나는 프로필에 박으면 두 프로필이 한 계보를 나눠 갖게 된다.
     @discardableResult
     public func resaveLiveIntoMatchingProfile(provider: Provider) throws -> UUID? {
         guard let io = ios[provider],
               let live = try io.readLiveSecretData(),
+              io.canStoreLiveSecret(live),
               let key = try io.liveAccountKey(),
               let profile = store.file.firstAccount(provider: provider, matching: key)
         else { return nil }
@@ -167,9 +194,12 @@ public final class Switcher: @unchecked Sendable {
               profile.id == store.file.activeByProvider[provider] else { return false }
         // 안정 읽기 뒤 열쇠를 한 번 더 확인한다 — 같은 이메일의 다른 조직으로 로그인이 끝난 직후라면
         // 이메일은 같아도 조직이 달라, 이 프로필에 남의 조직 토큰을 저장하게 된다(파일 읽기 한 번).
+        // 토큰과 신원이 어긋났으면(다른 조직 토큰, 로그아웃 도중의 빈 토큰) 저장하지 않는다 —
+        // false는 "이번 사이클은 신선하지 않다"는 뜻이라 호출자 계약과도 맞는다(실패 기록 24).
         guard let (data, stableEmail) = await io.readStableLiveSecretData(),
               stableEmail == key.emailAddress,
-              (try? io.liveAccountKey()) == key else { return false }
+              (try? io.liveAccountKey()) == key,
+              io.canStoreLiveSecret(data) else { return false }
         do {
             try saveLiveSecret(data, for: profile.id)
             return true
@@ -234,6 +264,7 @@ public final class Switcher: @unchecked Sendable {
         // 비밀+이메일을 두 번 읽어 일치할 때만(전환/리프레시 중 불일치 배제) 저장한다.
         guard let (live, stableEmail) = await io.readStableLiveSecretData(),
               stableEmail == key.emailAddress,
+              io.canStoreLiveSecret(live),
               let identity = try io.liveIdentity(), identity.key == key
         else { return nil }
         let nickname = store.file.suggestedNickname(provider: provider, for: identity)
@@ -268,9 +299,12 @@ public final class Switcher: @unchecked Sendable {
 
         // 실제 변화가 있을 때만(드묾) 비밀+이메일 두 번 읽어 일치 확인 후 저장. 열쇠를 한 번 더
         // 읽어 그 사이 같은 이메일의 다른 조직으로 바뀌지 않았는지도 확인한다(파일 읽기 한 번).
+        // ★ 토큰과 신원이 어긋났으면 활성도 옮기지 않는다 — 열쇠가 가리키는 프로필이 실제 로그인이
+        //   아니다. 이 경로가 "Max 토큰을 Team 프로필에 저장 + Team을 활성으로"를 만들던 자리다(실패 기록 24).
         guard let (live, stableEmail) = await io.readStableLiveSecretData(),
               stableEmail == key.emailAddress,
-              (try? io.liveAccountKey()) == key else { return }
+              (try? io.liveAccountKey()) == key,
+              io.canStoreLiveSecret(live) else { return }
         try saveLiveSecret(live, for: profile.id)
         if !activeUnchanged {
             try store.setActive(profile.id)

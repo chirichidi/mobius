@@ -23,12 +23,25 @@ public enum ReauthClearance {
     /// 파싱 불가/토큰 없음(빈 문자열 포함 — `CredentialBlob.refreshToken`이 nil로 준다)이면
     /// **false**로 보수적으로 물러난다: 모르면 딱지를 유지한다(살아있다고 단정하지 않는다).
     /// Claude 자격증명 형식 전용이라, Codex처럼 형식이 다른 secret은 자연히 false가 된다.
+    ///
+    /// ★ 예외 하나: 이전 저장본의 refresh 토큰이 **키는 있는데 빈 문자열**이면, 다음에 비지 않은
+    ///   토큰이 오는 것은 새 로그인뿐이다(빈 토큰으로는 refresh할 수 없다). claude가 로그아웃·재로그인
+    ///   도중 토큰만 비운 blob을 쓰고 그걸 되저장한 프로필이, CLI에서 다시 로그인해 멀쩡해진 뒤에도
+    ///   "재로그인 필요"를 달고 있었다(실측 2026-09-24, 실패 기록 24). 키가 **없는** blob은 여전히
+    ///   모르는 것으로 보고 유지한다.
     public static func refreshTokenRotated(previous: Data?, next: Data) -> Bool {
-        guard let previous,
-              let old = refreshToken(fromSecret: previous),
-              let new = refreshToken(fromSecret: next)
-        else { return false }
+        guard let previous, let new = refreshToken(fromSecret: next) else { return false }
+        guard let old = refreshToken(fromSecret: previous) else {
+            return hasEmptyRefreshToken(fromSecret: previous) && !new.isEmpty
+        }
         return old != new
+    }
+
+    private static func hasEmptyRefreshToken(fromSecret data: Data) -> Bool {
+        if let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) {
+            return CredentialBlob.hasEmptyRefreshToken(from: snap.keychainBlob)
+        }
+        return CredentialBlob.hasEmptyRefreshToken(from: data)
     }
 
     /// 저장 secret 바이트에서 refresh 토큰을 꺼낸다.

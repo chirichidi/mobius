@@ -163,16 +163,35 @@ struct AccountCardView: View {
             let text = mins >= 24 * 60
                 ? loc("모델 한도 · %d일 %d시간 후 초기화", mins / (24 * 60), (mins / 60) % 24)
                 : loc("모델 한도 · %d시간 %d분 후 초기화", mins / 60, mins % 60)
-            Label(text, systemImage: "sparkles")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Label(text, systemImage: "sparkles")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .fixedSize()
+                subtitleTrailer
+            }
         } else if autoSwitchOn, let rl = profile.rateLimit, rl.resetsAt > now, generallyLimited {
             let mins = max(0, Int(rl.resetsAt.timeIntervalSince(now) / 60))
-            Label(loc("리셋까지 %d시간 %d분", mins / 60, mins % 60), systemImage: "hourglass")
-                .font(.system(size: 10)).foregroundStyle(.orange)
+            HStack(spacing: 4) {
+                Label(loc("리셋까지 %d시간 %d분", mins / 60, mins % 60), systemImage: "hourglass")
+                    .font(.system(size: 10)).foregroundStyle(.orange)
+                    .fixedSize()
+                subtitleTrailer
+            }
         } else {
             // 회사 조직(Team/Enterprise)이면 이름을 앞에 적는다 — 같은 이메일의 계정이 여럿일 때 구분 근거.
             // `lineLimit(1)`: 긴 조직 이름이 줄바꿈으로 카드 높이를 바꾸지 않게(이슈 #5 계열).
             Text(profile.subtitle)
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                .lineLimit(1).truncationMode(.tail)
+        }
+    }
+
+    /// 한도 줄 뒤에 붙는 조직·등급. 한도에 걸리면 이 줄이 카운트다운으로 바뀌는데, 그때 조직까지
+    /// 사라지면 같은 이메일의 두 카드(회사 Team·개인 Max)가 닉네임 말고는 구분되지 않는다
+    /// (실측 2026-09-24 — 둘 다 한도에 걸린 화면). 카운트다운은 `fixedSize`로 지키고 이쪽이 잘린다.
+    @ViewBuilder private var subtitleTrailer: some View {
+        if !profile.subtitle.isEmpty {
+            Text("· \(profile.subtitle)")
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
                 .lineLimit(1).truncationMode(.tail)
         }

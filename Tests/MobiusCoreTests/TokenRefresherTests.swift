@@ -40,6 +40,14 @@ final class TokenRefresherTests: XCTestCase {
         XCTAssertEqual(t.expiresAtMs, 1_000_000_000 + 3600 * 1000)
         XCTAssertEqual(t.refreshTokenExpiresAtMs, 1_000_000_000 + 1_000_000 * 1000)
         XCTAssertEqual(t.scopes, ["user:inference"])
+        XCTAssertNil(t.organizationUuid, "응답에 organization이 없으면 모른다")
+    }
+
+    /// 응답의 organization.uuid = 이 토큰이 실제로 속한 조직(claude 2.1.281도 같은 필드를 읽는다).
+    func testParse200CarriesOrganizationUuid() throws {
+        let data = Data(#"{"access_token":"A","refresh_token":"R","expires_in":3600,"account":{"uuid":"acct-1","email_address":"t@x.com"},"organization":{"uuid":"org-team"}}"#.utf8)
+        let t = try OAuthTokenRefresher.parseResponse(status: 200, data: data, now: Date())
+        XCTAssertEqual(t.organizationUuid, "org-team")
     }
 
     func testParseInvalidGrantIsDeath() {
