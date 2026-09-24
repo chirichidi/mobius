@@ -372,7 +372,7 @@ final class AppState: ObservableObject {
                         reauthChanged = true
                         notifyOrganizationMismatch(profile.nickname)
                         continue
-                    case .locallyDead, .noRefreshToken:
+                    case .locallyDead, .noRefreshToken, .mixedSnapshot:
                         // **로컬로 판정 가능**한 죽음 — 매 팝오버 함께 도는 validateFallbacksLocally가
                         // 알림을 전담하므로(같은 계정에 알림 2개 방지) 여기선 알리지 않는다.
                         // check가 켠 needsReauth 반영(reload)만 하고 조용히 스킵.
@@ -559,6 +559,10 @@ final class AppState: ObservableObject {
                     changed = true   // targets는 !needsReauth만 → 새 전이 → 1회 알림
                     notify(title: loc("재로그인 필요"),
                            body: loc("%@ 계정의 로그인이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요.", p.nickname))
+                } else if r == .mixedSnapshot {
+                    // 저장 스냅샷 자체가 섞여 있다(네트워크 0으로 판정) — 여기서 알림을 전담한다.
+                    changed = true
+                    notifyOrganizationMismatch(p.nickname)
                 }
             }
             if changed { MobiusNotification.postAccountsChanged(); reload() }
@@ -577,7 +581,7 @@ final class AppState: ObservableObject {
             notify(title: loc("재로그인 필요"),
                    body: loc("%@ 계정의 로그인이 만료돼 전환을 건너뛰었어요. '다시 로그인'을 눌러주세요.", name))
             return false
-        case .organizationMismatch:
+        case .organizationMismatch, .mixedSnapshot:
             // 전환하면 이 카드와 다른 조직으로 로그인된다 — 죽은 계정과 같이 전환을 취소한다.
             notifyOrganizationMismatch(store.file.accounts.first { $0.id == id }?.nickname ?? "?")
             return false
@@ -615,7 +619,7 @@ final class AppState: ObservableObject {
             switch r {
             case .refreshedAlive:
                 changed = true
-            case .organizationMismatch:
+            case .organizationMismatch, .mixedSnapshot:
                 changed = true
                 notifyOrganizationMismatch(p.nickname)
             case .dead, .locallyDead, .noRefreshToken, .storeFailed:
@@ -1494,6 +1498,9 @@ final class AppState: ObservableObject {
             }
             let fromID = store.file.activeByProvider[provider]
             if provider == .codex { await quiesceCodexUsageTask() }
+            // primary 자동 복귀(.primaryRecovered)는 위 preflight를 거치지 않는다. 팝오버 게이지가 그
+            // 계정을 refresh하는 중이면 회전 직전 스냅샷이 라이브에 설치된다 — 끝날 때까지 기다린다(리뷰 P2).
+            if provider == .claude { await fallbackChecker.waitForInFlightRefresh(of: id) }
             do {
                 try switcher.switchTo(id)
                 engines[provider]?.noteSwitched(now: now,
@@ -1567,7 +1574,12 @@ final class AppState: ObservableObject {
                     performSwitch(to: id)
                 }
             } else {
-                performSwitch(to: id)   // 이미 재인증 필요로 마킹된 claude — preflight 없이 전환
+                // 이미 재인증 필요로 마킹된 claude — preflight 없이 전환하되, 진행 중인 refresh가 있으면
+                // 끝난 뒤에 설치한다(회전 직전 스냅샷을 라이브에 넣으면 그 토큰은 곧 소비돼 죽는다).
+                Task { @MainActor in
+                    await fallbackChecker.waitForInFlightRefresh(of: id)
+                    performSwitch(to: id)
+                }
             }
             return
         }

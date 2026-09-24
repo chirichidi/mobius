@@ -177,6 +177,9 @@ extension ClaudeConfigIO: ProviderConfigIO {
     /// ★ `seatTier`를 먼저 본다 — claude 2.1.281은 로그인 때 organizationUuid와 seatTier를 **한 번의
     ///   쓰기**로 갱신하지만 organizationType은 나중(bootstrap)에야 채운다(바이너리 실측). 조직과
     ///   같은 시점에 바뀌는 신호가 seatTier다. seatTier가 없거나 null이면 organizationType으로 폴백한다.
+    /// ★ 전제: 개인 구독의 seatTier는 null이다. 근거는 2026-09-24 실측 한 번(개인 Max: null, Team:
+    ///   `"team_tier_1"`)뿐이다. 개인 구독에도 seatTier가 채워지는 날이 오면 개인 구독 라이브가 계속
+    ///   `.organizationMismatch`가 되어 동기화가 멈춘다 — 그때는 organizationType을 먼저 보도록 되돌린다.
     static func isSeatOrganization(oauthBlock block: [String: Any]) -> Bool? {
         if let seat = block["seatTier"] as? String, !seat.isEmpty { return true }
         switch block["organizationType"] as? String {
@@ -191,9 +194,15 @@ extension ClaudeConfigIO: ProviderConfigIO {
     ///
     /// 두 곳은 쓰는 주체와 시점이 다르다. claude는 refresh 때 토큰만 쓰고 oauthAccount의
     /// organizationUuid는 건드리지 않으며, 세션 시작 때의 bootstrap은 **그 프로세스가 쥔 토큰**의
-    /// 조직으로 oauthAccount를 다시 쓴다(2.1.281 실측). 전환 직후 두 곳이 서로 다른 조직을 가리키는
-    /// 순간이 생기고, 이 둘을 짝지어 저장하면 조직 A의 토큰이 조직 B 프로필에 들어간다. 그 뒤로는
-    /// 두 프로필이 한 토큰 계보를 나눠 가져 한쪽이 회전할 때마다 다른 쪽이 invalid_grant가 된다.
+    /// 조직으로 oauthAccount를 다시 쓴다(2.1.281 실측). 전환 직후 옛 토큰을 캐시한 세션(캐시 30초)이
+    /// bootstrap하면 oauthAccount만 옛 조직으로 돌아가고, Keychain 토큰이 빈 문자열로 지워진 뒤에는
+    /// 다른 세션의 refresh 결과가 그 자리를 채울 수 있다. 이렇게 두 곳이 서로 다른 조직을 가리킬 때
+    /// 짝지어 저장하면 조직 A의 토큰이 조직 B 프로필에 들어가고, 그 뒤로는 두 프로필이 한 토큰 계보를
+    /// 나눠 가져 한쪽이 회전할 때마다 다른 쪽이 invalid_grant가 된다.
+    ///
+    /// 판정 근거는 blob의 `subscriptionType`이다. claude는 이 값을 로그인 때 조직 종류에서 만들고,
+    /// 조직 종류를 모르면 null로 둔다. null인 계보에서는 판정할 수 없어 `.storable`이 된다
+    /// (2026-09-24 실측 환경에서는 Team `"team"`, 개인 Max `"max"`로 채워져 있었다).
     ///
     /// 판정은 좌석형(Team·Enterprise)인지 개인 구독(Max·Pro)인지만 본다. 같은 이메일의 개인 조직은
     /// 하나뿐이라 회사 조직과 개인 구독이 섞이는 경우를 정확히 잡는다. 같은 종류의 두 조직(Team과

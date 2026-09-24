@@ -351,8 +351,9 @@ final class SwitcherTests: XCTestCase {
         return (team, max)
     }
 
-    /// 사고 재현 ①: Max가 활성인데 실행 중인 세션이 Team 토큰을 Keychain에 되썼다(oauthAccount는 Max 그대로).
-    /// 5분 동기화가 이걸 Max 프로필에 저장하면 두 카드가 Team 사용량을 보이고 한 계보를 나눠 갖는다.
+    /// 사고 재현 ①: Max가 활성인데 Keychain에 Team 토큰이 있다(oauthAccount는 Max 그대로). 2.1.281에서는
+    /// Keychain 토큰이 invalid_grant로 빈 문자열이 된 뒤 Team 토큰을 쥔 세션의 refresh가 CAS를 통과해 채울 때
+    /// 생긴다. 5분 동기화가 이걸 Max 프로필에 저장하면 두 카드가 Team 사용량을 보이고 한 계보를 나눠 갖는다.
     func testActiveSyncRefusesTokenFromOtherOrganization() async throws {
         let (team, max) = try setUpTwoOrganizations()
         try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount))
@@ -398,8 +399,8 @@ final class SwitcherTests: XCTestCase {
         XCTAssertFalse(store.file.accounts.contains { $0.organizationUuid == "org-max" })
     }
 
-    /// claude가 재로그인 도중 토큰만 비운 blob을 Keychain에 쓴다(실측 `.bak`). 그걸 되저장하면
-    /// 멀쩡한 토큰이 사라져 "재로그인 필요"가 된다.
+    /// claude는 invalid_grant를 받은 토큰을 빈 문자열로 지운다(실측 `.bak`). 로그인 없는 상태를 프로필 저장본으로
+    /// 굳히지 않는다 — 저장본을 남겨 두면 폴백 검증이 그 토큰의 생사를 스스로 판정한다.
     func testActiveSyncDoesNotSaveLoggedOutBlob() async throws {
         let (_, max) = try setUpTwoOrganizations()
         try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "", account: Self.maxAccount))

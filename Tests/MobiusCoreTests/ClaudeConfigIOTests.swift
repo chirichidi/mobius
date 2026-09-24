@@ -155,6 +155,11 @@ final class ClaudeConfigIOTests: XCTestCase {
         XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(CredentialsSnapshot(keychainBlob: onlyMcp, credentialsFileData: onlyMcp,
                                                                               oauthAccountJSON: Data(Self.teamAccount.utf8))),
                        .loggedOut)
+        // MCP 항목이 없는 사용자에게는 재로그인 준비 단계가 빈 객체를 남긴다(리뷰 P2)
+        let empty = Data("{}".utf8)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(CredentialsSnapshot(keychainBlob: empty, credentialsFileData: empty,
+                                                                              oauthAccountJSON: Data(Self.teamAccount.utf8))),
+                       .loggedOut)
     }
 
     /// 판정 근거가 없으면 막지 않는다 — 구버전 claude(subscriptionType·seatTier 없음)와 테스트 blob.

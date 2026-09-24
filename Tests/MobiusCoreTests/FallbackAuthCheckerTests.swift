@@ -247,7 +247,83 @@ final class FallbackAuthCheckerTests: XCTestCase {
         XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: fallback.id)).keychainBlob), "RELOGIN")
     }
 
+    /// 사고 뒤 업그레이드한 사용자의 모양: 개인 Max 카드의 저장본에 Team 토큰이 들어 있다. 이걸 refresh하면
+    /// 같은 토큰을 쥔 라이브·Team 카드까지 죽는다 — 네트워크 없이 먼저 잡아야 한다(리뷰 P1).
+    func testMixedStoredSnapshotIsFlaggedWithoutRefresh() async throws {
+        let blob = Data(#"{"claudeAiOauth":{"accessToken":"AT","refreshToken":"SHARED","expiresAt":1,"refreshTokenExpiresAt":\#(futureRteMs),"subscriptionType":"team"}}"#.utf8)
+        let mixed = try store.upsertProfile(nickname: "max", snapshot: CredentialsSnapshot(
+            keychainBlob: blob, credentialsFileData: blob,
+            oauthAccountJSON: Data(#"{"emailAddress":"t@x.com","organizationType":"claude_max","seatTier":null,"organizationUuid":"org-max"}"#.utf8)))
+        let mock = MockRefresher(.success(tokens(org: "org-team")))
+        let checker = FallbackAuthChecker(store: store, refresher: mock)
+
+        let local = await checker.check(mixed.id, activeAccountID: active.id, now: now, allowNetwork: false)
+        XCTAssertEqual(local, .mixedSnapshot, "팝오버의 로컬 검증에서도 잡힌다")
+        try store.setNeedsReauth(mixed.id, false)
+        let network = await checker.check(mixed.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(network, .mixedSnapshot)
+        XCTAssertEqual(mock.callCount, 0, "공유 계보를 소비하면 안 된다")
+        XCTAssertTrue(reauth(mixed.id))
+    }
+
+    /// 두 프로필이 같은 refresh 토큰을 쥐고 있으면 refresh하지 않는다 — 조직 종류가 같거나
+    /// subscriptionType이 없어 스냅샷 판정이 못 가르는 경우의 안전장치.
+    func testSharedRefreshTokenIsNotRefreshed() async throws {
+        try store.setSecret(snap(email: "a@x.com", rt: "FRT", rteMs: futureRteMs), for: active.id)
+        let mock = MockRefresher(.success(tokens(org: nil)))
+        let r = await FallbackAuthChecker(store: store, refresher: mock).check(fallback.id, activeAccountID: active.id, now: now)
+        XCTAssertEqual(r, .transient)
+        XCTAssertEqual(mock.callCount, 0)
+        XCTAssertFalse(reauth(fallback.id), "누가 주인인지 모르므로 마킹하지 않는다")
+    }
+
+    /// 응답으로 불일치가 드러나면 회전본을 버리지 않고, 그 조직의 비활성 프로필에 넘긴다 — 서버는 이미
+    /// 이전 토큰을 소비했으므로 버리면 살아남는 사본이 없다(리뷰 P1).
+    func testResponseMismatchHandsRotationToOwningProfile() async throws {
+        let mixed = try orgFallback(org: "org-max")   // blob만으로는 섞였는지 모르는 저장본
+        let ownerBlob = Data(#"{"claudeAiOauth":{"accessToken":"OAT","refreshToken":"DEAD","expiresAt":1,"refreshTokenExpiresAt":\#(futureRteMs),"subscriptionType":"team"}}"#.utf8)
+        let owner = try store.upsertProfile(nickname: "team-owner", snapshot: CredentialsSnapshot(
+            keychainBlob: ownerBlob, credentialsFileData: ownerBlob,
+            oauthAccountJSON: Data(#"{"emailAddress":"t@x.com","organizationName":"acme","organizationUuid":"org-team"}"#.utf8)))
+        try store.setNeedsReauth(owner.id, true)   // 계보를 빼앗겨 죽어 있던 주인
+
+        let r = await FallbackAuthChecker(store: store, refresher: MockRefresher(.success(tokens(org: "org-team"))))
+            .check(mixed.id, activeAccountID: active.id, now: now)
+
+        XCTAssertEqual(r, .organizationMismatch)
+        XCTAssertTrue(reauth(mixed.id))
+        let ownerSnap = try XCTUnwrap(store.secret(for: owner.id))
+        XCTAssertEqual(CredentialBlob.refreshToken(from: ownerSnap.keychainBlob), "NRT", "회전본은 주인에게")
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: ownerSnap)?.organizationUuid, "org-team",
+                       "주인의 oauthAccount는 그대로")
+        XCTAssertFalse(reauth(owner.id))
+    }
+
+    /// preflight를 거치지 않는 전환은 진행 중 refresh가 회전본을 저장할 때까지 기다린다(리뷰 P2).
+    func testWaitForInFlightRefreshReturnsAfterRotationIsStored() async throws {
+        let gated = GatedRefresher(tokens: tokens(org: nil))
+        let checker = FallbackAuthChecker(store: store, refresher: gated)
+        let id = fallback.id, activeID = active.id, ts = now
+        let entered = expectation(description: "refresh entered")
+        gated.onEnter = { entered.fulfill() }
+        let refresh = Task { await checker.check(id, activeAccountID: activeID, now: ts) }
+        await fulfillment(of: [entered], timeout: 2)
+
+        let waited = expectation(description: "wait returned")
+        let waiter = Task { await checker.waitForInFlightRefresh(of: id); waited.fulfill() }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: id)).keychainBlob), "FRT")
+        gated.release()
+        await fulfillment(of: [waited], timeout: 2)
+        XCTAssertEqual(CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: id)).keychainBlob), "NRT",
+                       "기다린 뒤에는 회전본이 저장돼 있다 — 전환이 이걸 설치한다")
+        _ = await refresh.value; _ = await waiter.value
+        await checker.waitForInFlightRefresh(of: id)   // 진행 중이 없으면 바로 돌아온다
+    }
+
     /// HTTP 왕복 사이에 이 계정이 활성이 됐으면(CLI 전환 등) 라이브가 진실이다 — 저장하지 않는다.
+    /// 앱 안의 전환은 `waitForInFlightRefresh`로 이 창을 닫으므로, 이 경로는 CLI 전환(다른 프로세스)의
+    /// 알려진 한계다. 소비된 "FRT"가 남는 것이 현재 동작이다.
     func testRotationIsNotStoredWhenAccountBecameActive() async throws {
         let gated = GatedRefresher(tokens: tokens(org: nil))
         let checker = FallbackAuthChecker(store: store, refresher: gated)

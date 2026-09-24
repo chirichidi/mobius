@@ -153,24 +153,27 @@ public enum CredentialBlob {
         guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any] else { return nil }
         return msDate(tokenDict(obj)?["refreshTokenExpiresAt"])
     }
-    /// refresh 토큰 **키는 있는데 값이 빈 문자열**인가. claude가 토큰만 비우고 나머지(scopes·
-    /// subscriptionType·refreshTokenExpiresAt)는 남긴 blob을 Keychain에 쓰는 순간이 있다(실측
-    /// 2026-09-24, 저장 스냅샷 `.bak`). 로그인이 없는 상태이지 손상이 아니다 — 이 뒤에 오는 비지 않은
-    /// 토큰은 새 로그인에서만 나올 수 있다(`ReauthClearance`). 키가 없으면 false(모름).
+    /// refresh 토큰 **키는 있는데 값이 빈 문자열**인가. claude는 refresh가 invalid_grant를 받으면
+    /// 그 죽은 토큰을 `refreshToken:""`·`accessToken:""`·`expiresAt:0`으로 지우고 나머지(scopes·
+    /// subscriptionType·refreshTokenExpiresAt)는 남긴다(2.1.281 실측, 저장 스냅샷 `.bak`에도 남아
+    /// 있었다). 죽은 로그인이 치워진 상태이지 손상이 아니다(`ReauthClearance`). 키가 없으면 false(모름).
     public static func hasEmptyRefreshToken(from blob: Data) -> Bool {
         guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
               let rt = tokenDict(obj)?["refreshToken"] as? String else { return false }
         return rt.isEmpty
     }
 
-    /// claude 자격증명 blob 모양인데 **쓸 수 있는 로그인이 없는가**. 둘 중 하나다:
-    ///   - `claudeAiOauth`(또는 평면 토큰 필드)는 있는데 refresh 토큰이 없거나 빈 문자열
-    ///   - `claudeAiOauth`가 통째로 없고 다른 항목(`mcpOAuth` 등)만 남음 — claude 2.1.281의
-    ///     로그아웃(`performLogout`)은 재로그인 때 이 항목만 지우고 나머지를 남긴다(바이너리 실측)
-    /// 로그아웃·재로그인 도중의 모양이라 프로필에 저장하면 멀쩡한 토큰을 덮어쓴다(실패 기록 24).
-    /// 모양을 알 수 없는 blob(claude 필드가 하나도 없음)은 false — 모르면 막지 않는다.
+    /// claude 자격증명 blob 모양인데 **쓸 수 있는 로그인이 없는가**. 셋 중 하나다:
+    ///   - `claudeAiOauth`(또는 평면 토큰 필드)는 있는데 refresh 토큰이 없거나 빈 문자열 — claude는
+    ///     refresh가 invalid_grant를 받으면 그 죽은 토큰을 빈 문자열로 지운다(2.1.281 실측)
+    ///   - `claudeAiOauth`가 통째로 없고 다른 항목(`mcpOAuth` 등)만 남음 — 재로그인 준비 단계는
+    ///     이 항목만 지우고 나머지를 남긴다(2.1.281 실측)
+    ///   - 빈 객체 `{}` — MCP 항목이 없는 사용자에게 재로그인 준비 단계가 남기는 모양(리뷰 P2)
+    /// 이런 blob을 프로필에 저장하면 그 프로필의 저장본이 로그인 없는 상태로 덮인다(실패 기록 24).
+    /// 모양을 알 수 없는 blob(claude 필드가 하나도 없는 비지 않은 객체)은 false — 모르면 막지 않는다.
     public static func lacksLogin(_ blob: Data) -> Bool {
         guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any] else { return false }
+        if obj.isEmpty { return true }
         let looksLikeClaude = obj["claudeAiOauth"] != nil || obj["mcpOAuth"] != nil
             || obj["refreshToken"] != nil || obj["accessToken"] != nil
         return looksLikeClaude && refreshToken(from: blob) == nil

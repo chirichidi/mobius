@@ -65,7 +65,14 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
   서로 다른 조직을 가리키는 순간이 생긴다(실패 기록 24).
   - refresh는 토큰만 Keychain에 쓴다. 응답에 `organization.uuid`가 오지만 oauthAccount의
     `organizationUuid`·`emailAddress`는 고치지 않고, 프로필을 다시 받은 경우에도 `seatTier`·
-    `profileFetchedAt` 같은 일부 필드만 덮어쓴다. blob의 `subscriptionType`은 이전 blob에서 물려준다.
+    `profileFetchedAt` 같은 일부 필드만 덮어쓴다. blob의 `subscriptionType`은 "프로필을 다시 받은 값,
+    없으면 지금 저장된 토큰의 값"이다. 로그인 때 조직 종류(`claude_team`→`team` 등)에서 만들고, 조직
+    종류를 모르면 null이다(2026-09-24 실측 환경: Team `"team"`, 개인 Max `"max"`).
+  - refresh 결과 저장은 **CAS**다. Keychain의 refresh 토큰이 요청에 쓴 토큰과 같거나 **빈 문자열일 때만**
+    쓰고, 다르면 쓰지 않는다(`adopted_sibling`). 그래서 Mobius가 전환해 둔 Keychain을 다른 세션의 refresh가
+    덮는 일은 Keychain 토큰이 빈 문자열일 때만 일어난다.
+  - refresh가 invalid_grant를 받으면, Keychain의 refresh 토큰이 그 죽은 토큰과 같을 때
+    `refreshToken:""`·`accessToken:""`·`expiresAt:0`으로 지운다(`scopes`·`subscriptionType`은 남음).
   - 세션 시작과 로그인 끝의 bootstrap은 **그 프로세스가 쥔 토큰**의 조직으로 oauthAccount의
     `organizationUuid`·`organizationName`·`organizationType`·`seatTier`를 다시 쓴다. 가드는
     `accountUuid` 비교뿐인데, 같은 이메일의 조직들은 `accountUuid`가 같아서 가드를 그대로 통과한다.
@@ -73,11 +80,10 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     (`mcpOAuth`는 남김) oauthAccount도 지운다 ② 프로필을 받아 oauthAccount를 쓴다(organizationUuid·
     seatTier 포함, organizationType은 아직 없음) ③ 토큰을 쓴다 ④ bootstrap이 organizationType을
     채운다. 로그인은 이전 refresh 토큰을 폐기(revoke)하지 않는다. 폐기는 `/logout`에서만 한다.
-  - 이와 별도로 refresh 토큰만 빈 문자열로 비운 blob(`scopes`·`subscriptionType`은 남음)이
-    Keychain에 놓이는 순간이 실측됐다. 어느 경로가 쓰는지는 확인하지 못했다.
-  - 각 claude 프로세스는 Keychain 읽기를 **30초** 캐시한다.
-  - 그러므로 조직과 같은 시점에 바뀌는 신호는 `seatTier`다(좌석형이면 문자열, 개인 구독이면 null).
-    `organizationType`은 로그인 직후 한동안 비어 있거나 옛 값일 수 있다.
+  - 각 claude 프로세스는 Keychain 읽기를 **30초** 캐시한다. 전환 직후 옛 토큰을 캐시한 세션이
+    bootstrap하면 oauthAccount만 옛 조직으로 돌아간다.
+  - 그러므로 조직과 같은 시점에 바뀌는 신호는 `seatTier`다(좌석형이면 문자열, 개인 구독이면 null —
+    개인 구독 쪽은 2026-09-24 실측 한 번이 근거). `organizationType`은 로그인 직후 한동안 비어 있을 수 있다.
 - **Keychain blob에는 MCP 서버 OAuth 토큰(`mcpOAuth`)도 들어 있다.** 전환은 blob을 통째로 바꾸므로
   MCP 토큰도 그 프로필이 저장한 시점의 값으로 돌아간다. MCP 토큰은 Claude 계정과 무관한데, 그 사이
   회전했다면 되돌아간 쪽은 죽은 토큰이다(2026-09-24 기준 미해결, 관찰된 피해 없음).
@@ -693,29 +699,40 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     Team 토큰이 저장돼 있었다. 한도 기록도 두 프로필에 3초 간격으로, 같은 리셋 시각으로 찍혀 있었다.
     두 프로필이 한 토큰 계보를 나눠 가지면 한쪽이 refresh 토큰을 회전할 때마다 다른 쪽의 사본이
     invalid_grant가 된다. 그래서 "전환할 때마다 재로그인"이 된다. 덤으로 Team 프로필의 `.bak`에는
-    refresh 토큰이 빈 문자열인 blob이 남아 있었다. claude가 로그아웃·재로그인 도중 Keychain에 놓는
-    상태를 5분 동기화가 그대로 저장해 멀쩡한 토큰을 덮은 것이다. 그 뒤 CLI에서 다시 로그인해도
-    `ReauthClearance`가 "빈 토큰 → 새 토큰"을 회전으로 보지 않아 딱지가 남았다.
+    refresh 토큰이 빈 문자열인 blob이 남아 있었다. 라이브 Team 토큰이 invalid_grant를 받자 claude가 그
+    죽은 토큰을 지운 상태이고, 5분 동기화가 그걸 그대로 저장했다(저장 시점에 토큰은 이미 죽어 있었다).
+    그 뒤 CLI에서 다시 로그인해도 `ReauthClearance`가 "빈 토큰 → 새 토큰"을 회전으로 보지 않아 딱지가 남았다.
     원인은 한 가지다. `readLiveSnapshot`은 토큰을 Keychain에서, 그 토큰이 누구 것인지를
     ~/.claude.json에서 따로 읽는데, claude는 두 곳을 **서로 다른 경로와 시점에** 쓴다(핵심 사실
     "토큰과 신원은 쓰는 경로가 다르다"). 이메일만 대조하던 시절에는 조직이 달라도 같은 프로필이라
     드러나지 않았고, 조직을 가르게 되면서(23) 두 곳이 다른 조직을 가리키는 순간이 곧 오염이 됐다.
     refresh는 oauthAccount의 조직을 고치지 않으므로 한 번 어긋나면 저절로 맞춰지지 않고, 5분
-    동기화가 틀린 토큰을 계속 그 프로필에 저장한다. 처음 어긋난 계기가 전환과 겹친 세션의 refresh인지,
-    옛 토큰을 쥔 세션의 bootstrap인지는 앱에 로그가 없어 확정하지 못했다.
+    동기화가 틀린 토큰을 계속 그 프로필에 저장한다. 2.1.281에서 두 곳이 어긋나는 경로는 둘이다. 옛 토큰을
+    캐시한 세션의 bootstrap이 oauthAccount만 옛 조직으로 되돌리는 경우(이때 Keychain 토큰은 Mobius가 마지막에
+    설치한 활성 프로필의 것이다)와, Keychain 토큰이 빈 문자열로 지워진 뒤 다른 세션의 refresh 결과가 CAS를
+    통과해 그 자리를 채우는 경우다. 이번 사고가 어느 쪽이었는지는 앱에 로그가 없어 확정하지 못했다.
     → (a) 라이브를 프로필에 저장하는 모든 경로(되저장·5분 동기화·reconcile·adopt·LoginFlow·CLI
     capture)가 `ProviderConfigIO.canStoreLiveSecret`을 먼저 본다. Claude 판정은
     `ClaudeConfigIO.liveSnapshotVerdict`이고 네트워크를 쓰지 않는다. 로그인이 없는 blob(빈 refresh
-    토큰, `claudeAiOauth` 없이 `mcpOAuth`만 남음)은 `.loggedOut`, blob의 `subscriptionType`이
+    토큰, `claudeAiOauth` 없이 `mcpOAuth`만 남음, 빈 객체 `{}`)은 `.loggedOut`, blob의 `subscriptionType`이
     좌석형(team·enterprise)인지와 oauthAccount가 좌석형 조직(`seatTier` 우선, 없으면
     `organizationType`)인지가 다르면 `.organizationMismatch`다. 어긋나면 저장도 활성 이동도 하지 않고
     다음 틱에 다시 본다. 같은 이메일의 개인 조직은 하나뿐이라 회사↔개인 혼입을 정확히 잡고, Pro→Max처럼
-    개인 구독 안에서 요금제가 바뀐 경우는 걸리지 않는다. (b) 폴백 refresh 응답의 `organization.uuid`를
-    프로필 조직과 대조해 다르면 회전본을 저장하지 않고 재로그인 필요로 마킹한다(`.organizationMismatch`).
-    이미 섞인 프로필을 찾아내는 경로이고, (a)가 못 가르는 같은 종류의 두 조직(Team과 다른 Team)도 여기서
-    갈린다. (c) 폴백 회전본은 credential lock 안에서 "그사이 스냅샷이 바뀌지 않았고 활성이 되지 않았다"를
-    확인한 뒤 저장한다(Codex 경로와 같은 규칙). (d) `ReauthClearance`는 이전 저장본의 refresh 토큰이
-    **빈 문자열**이고 새 토큰이 있으면 해제한다. 키가 없는 경우는 여전히 모르는 것으로 본다.
+    개인 구독 안에서 요금제가 바뀐 경우는 걸리지 않는다. `subscriptionType`이 null인 계보는 판정할 수 없다.
+    (b) 이미 섞인 저장본은 **refresh하기 전에** 잡는다. 섞인 저장본은 대개 라이브나 다른 카드와 같은 refresh
+    토큰을 쥐고 있어서, 회전하는 순간 올바른 쪽의 계보까지 끊긴다(리뷰에서 드러난 P1). 그래서
+    `FallbackAuthChecker`는 저장 스냅샷에 같은 판정을 적용해 어긋나면 네트워크 없이 `.mixedSnapshot`으로
+    마킹하고, 다른 Claude 프로필의 저장본과 refresh 토큰이 같으면 refresh하지 않는다(누가 주인인지 모르므로
+    마킹도 안 한다). 그래도 refresh 응답의 `organization.uuid`가 프로필 조직과 다르면(같은 종류의 두 조직)
+    `.organizationMismatch`로 마킹하고, 회전본은 버리지 않고 그 조직의 같은 이메일 **비활성** 프로필이 정확히
+    하나일 때 그쪽에 넘긴다. 서버가 이미 이전 토큰을 소비했으므로 버리면 살아남는 사본이 없다.
+    (c) 폴백 회전본은 credential lock 안에서 "그사이 스냅샷이 바뀌지 않았고 활성이 되지 않았다"를
+    확인한 뒤 저장한다(Codex 경로와 같은 규칙). 앱 안의 전환은 모두 대상 계정의 진행 중 refresh를 기다린 뒤
+    스냅샷을 설치한다(preflight 합류, primary 자동 복귀와 재로그인 필요 계정 전환은 `waitForInFlightRefresh`).
+    CLI 전환은 다른 프로세스라 기다리지 못한다 — 그때 회전본을 버리면 라이브에 설치된 토큰이 소비된 것이라
+    계보가 끊기는 알려진 한계다. (d) `ReauthClearance`는 이전 저장본의 refresh 토큰이 **빈 문자열**이고
+    새 토큰이 있으면 해제한다. 그 새 토큰은 새 로그인이거나, CAS를 통과한 다른 세션의 refresh 결과다.
+    어느 쪽이든 살아 있고, 다른 조직의 것인지는 (a)·(b)가 거른다. 키가 없는 경우는 여전히 모르는 것으로 본다.
     (e) 표시: Team 등급이 organizationRateLimitTier의 내부 코드명("default_raven" → "Raven")으로
     뜨던 것을 organizationType 우선으로 바꾸고("Team"), `capitalized`가 만들던 "Max 20X"를 "Max 20x"로
     고쳤다. 기존 프로필은 `Switcher.refreshTierLabels`가 시작 때 저장 스냅샷에서 다시 계산한다. 한도에

@@ -25,6 +25,10 @@ public enum FallbackCheckResult: Equatable, Sendable {
     /// 있었다(실패 기록 24). 회전본은 저장하지 않고 재로그인 필요로 마킹한다: 그 토큰을 이
     /// 프로필에 두면 카드가 다른 조직의 사용량을 보여 주고, 전환하면 다른 조직으로 로그인된다.
     case organizationMismatch
+    /// 저장 스냅샷 자체의 토큰과 oauthAccount가 서로 다른 조직 종류를 가리킨다(네트워크 0 판정).
+    /// refresh하지 않고 재로그인 필요로 마킹한다. `organizationMismatch`와 나눈 이유는 알림 담당이
+    /// 다르기 때문이다 — `locallyDead`/`dead`처럼 로컬 판정은 팝오버의 로컬 검증이 알린다.
+    case mixedSnapshot
 }
 
 public final class FallbackAuthChecker: @unchecked Sendable {
@@ -72,6 +76,12 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         if CredentialBlob.isRefreshTokenExpired(blob: snap.keychainBlob, now: now) {
             try? store.setNeedsReauth(id, true); return .locallyDead
         }
+        // 네트워크 0: 저장 스냅샷 자체의 토큰과 신원이 어긋나 있으면(토큰은 Team, oauthAccount는 Max)
+        // 이미 섞인 카드다. **refresh하기 전에** 잡아야 한다 — 섞인 저장본은 대개 라이브나 다른 카드와
+        // 같은 refresh 토큰을 쥐고 있어서, 여기서 회전하면 올바른 쪽의 계보까지 끊긴다(실패 기록 24, 리뷰 P1).
+        if ClaudeConfigIO.liveSnapshotVerdict(snap) == .organizationMismatch {
+            try? store.setNeedsReauth(id, true); return .mixedSnapshot
+        }
         guard allowNetwork else { return .transient }   // 로컬 검사 통과 — 네트워크는 생략
 
         // 같은 계정의 네트워크 refresh는 동시에 1건만 — 진행 중이면 그 결과에 합류한다.
@@ -97,27 +107,37 @@ public final class FallbackAuthChecker: @unchecked Sendable {
         guard let rt = CredentialBlob.refreshToken(from: snap.keychainBlob) else {
             try? store.setNeedsReauth(id, true); return .noRefreshToken
         }
+        // 다른 Claude 프로필의 저장본이 **같은 refresh 토큰**을 쥐고 있으면 refresh하지 않는다. 한 계보를
+        // 두 프로필이 나눠 가진 상태 자체가 오염이고(실패 기록 24), 회전하면 다른 쪽 사본이 invalid_grant가
+        // 된다. 누가 주인인지는 여기서 가릴 수 없으므로 마킹 없이 판정을 미룬다. 위의 스냅샷 판정이 못 잡는
+        // 경우(같은 종류의 두 조직, subscriptionType이 없는 옛 계보)를 막는 자리다.
+        if sharesRefreshToken(rt, exceptProfile: id) { return .transient }
         let scopes = CredentialBlob.scopes(from: snap.keychainBlob)
         do {
             let tokens = try await refresher.refresh(refreshToken: rt, scopes: scopes, now: now)
             // 여기 도달 = old refresh 토큰은 서버에서 소비됨. 새 토큰을 반드시 저장해야 한다.
-            // 단 응답이 말하는 조직이 이 프로필의 조직과 다르면 저장할 자리가 아니다 — 추가 호출 없이
-            // 오염을 잡는 유일한 지점이고, 같은 종류의 두 조직(Team과 다른 Team)도 여기서는 갈린다.
-            let profileOrg = store.file.accounts.first(where: { $0.id == id })?.organizationUuid ?? ""
-            if let tokenOrg = tokens.organizationUuid, !profileOrg.isEmpty, tokenOrg != profileOrg {
-                try? store.setNeedsReauth(id, true); return .organizationMismatch
-            }
             guard let newSnap = snap.applyingRefreshedTokens(tokens) else {
                 try? store.setNeedsReauth(id, true); return .storeFailed
             }
+            let profileOrg = store.file.accounts.first(where: { $0.id == id })?.organizationUuid ?? ""
+            let foreignOrg = tokens.organizationUuid.flatMap {
+                !profileOrg.isEmpty && $0 != profileOrg ? $0 : nil
+            }
             // ★ 저장은 credential lock 안에서 다시 확인한 뒤에 한다(Codex 경로와 같은 규칙).
             //   HTTP 왕복 사이에 (1) 재로그인·되저장이 이 프로필에 새 스냅샷을 썼으면 옛 계보의
-            //   회전본으로 덮지 않고, (2) 이 계정이 활성이 됐으면 라이브(~/.claude)가 진실이므로
-            //   손대지 않는다. 앱 안의 전환은 preflight가 진행 중 refresh에 합류해 여기까지 오지
-            //   않지만, CLI 전환은 다른 프로세스라 합류가 없다. 둘 다 판정 보류(transient)다.
-            return store.withCredentialLock(id) { () -> FallbackCheckResult in
+            //   회전본으로 덮지 않고, (2) 이 계정이 활성이 됐으면 라이브(~/.claude)를 건드리지 않는다.
+            //   앱 안의 전환은 전부 진행 중 refresh를 기다린 뒤 스냅샷을 설치하므로(preflight 합류,
+            //   `waitForInFlightRefresh`) (2)는 다른 프로세스인 CLI 전환에서만 생긴다. 이때 라이브에
+            //   설치된 토큰은 방금 소비된 것이라 회전본을 버리면 계보가 끊기지만, 라이브에 쓸 수단이
+            //   이 타입에 없다 — 알려진 한계로 둔다. 둘 다 판정 보류(transient)다.
+            let outcome = store.withCredentialLock(id) { () -> FallbackCheckResult in
                 guard (try? store.secret(for: id)) == snap,
                       store.file.activeByProvider[.claude] != id else { return .transient }
+                // 응답이 말하는 조직이 이 프로필의 조직과 다르면 저장할 자리가 아니다. 추가 호출 없이
+                // 오염을 잡는 지점이고, 같은 종류의 두 조직(Team과 다른 Team)도 여기서는 갈린다.
+                if foreignOrg != nil {
+                    try? store.setNeedsReauth(id, true); return .organizationMismatch
+                }
                 do {
                     try store.setSecret(newSnap, for: id)     // 원자 저장(temp→rename)
                     try? store.setNeedsReauth(id, false)      // 살아있음 → 딱지 해제
@@ -127,10 +147,54 @@ public final class FallbackAuthChecker: @unchecked Sendable {
                     try? store.setNeedsReauth(id, true); return .storeFailed
                 }
             }
+            // 락을 놓은 뒤에 넘긴다 — 두 프로필의 credential lock을 겹쳐 잡지 않는다.
+            if outcome == .organizationMismatch, let foreignOrg {
+                handOverRotation(tokens, organizationUuid: foreignOrg, from: id)
+            }
+            return outcome
         } catch TokenRefresherError.invalidGrant {
             try? store.setNeedsReauth(id, true); return .dead
         } catch {
             return .transient   // 네트워크/5xx — 죽음으로 단정하지 않음
+        }
+    }
+
+    /// 이 계정의 진행 중 refresh가 있으면 끝날 때까지 기다린다(새 refresh는 쏘지 않는다).
+    /// preflight를 거치지 않는 전환(primary 자동 복귀, 재로그인 필요 계정의 수동 전환)이 **회전 직전의
+    /// 스냅샷**을 라이브에 설치하지 않게 한다 — 그 토큰은 진행 중 refresh가 곧 소비해 죽는다(리뷰 P2).
+    public func waitForInFlightRefresh(of id: UUID) async {
+        let task = withLock { inFlight[id] }
+        _ = await task?.value
+    }
+
+    /// `id` 말고 다른 Claude 프로필의 저장본이 이 refresh 토큰을 쥐고 있는가.
+    /// 비밀 **파일이 있는** 계정만 읽는다(stat 게이트 — 구버전 Keychain 폴백 승인창을 타지 않는다).
+    private func sharesRefreshToken(_ rt: String, exceptProfile id: UUID) -> Bool {
+        store.file.accounts.contains { other in
+            guard other.provider == .claude, other.id != id,
+                  FileManager.default.fileExists(atPath: store.env.secretFile(for: other.id).path),
+                  let theirs = try? store.secret(for: other.id) else { return false }
+            return CredentialBlob.refreshToken(from: theirs.keychainBlob) == rt
+        }
+    }
+
+    /// 회전본의 진짜 주인에게 넘긴다 — 응답이 말하는 조직의 같은 이메일 프로필이 **정확히 하나**이고
+    /// 비활성이면, 그 프로필의 스냅샷(자기 oauthAccount 유지)에 새 토큰을 반영한다. 서버는 이미 이전
+    /// 토큰을 소비했으므로, 버리면 이 계보의 살아남는 사본이 하나도 없다(리뷰 P1). 주인이 활성이면
+    /// 라이브가 그 계정을 관리하므로 넘기지 않는다. 주인이 없거나 여럿이면 버린다(모호하면 손대지 않는다).
+    private func handOverRotation(_ tokens: RefreshedTokens, organizationUuid org: String, from id: UUID) {
+        guard let source = store.file.accounts.first(where: { $0.id == id }) else { return }
+        let owners = store.file.accounts.filter {
+            $0.provider == .claude && $0.id != id
+                && $0.emailAddress == source.emailAddress && $0.organizationUuid == org
+        }
+        guard owners.count == 1, let owner = owners.first else { return }
+        store.withCredentialLock(owner.id) {
+            guard store.file.activeByProvider[.claude] != owner.id,
+                  let ownerSnap = try? store.secret(for: owner.id),
+                  let rebuilt = ownerSnap.applyingRefreshedTokens(tokens),
+                  (try? store.setSecret(rebuilt, for: owner.id)) != nil else { return }
+            try? store.setNeedsReauth(owner.id, false)
         }
     }
 }

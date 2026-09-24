@@ -24,10 +24,13 @@ public enum ReauthClearance {
     /// **false**로 보수적으로 물러난다: 모르면 딱지를 유지한다(살아있다고 단정하지 않는다).
     /// Claude 자격증명 형식 전용이라, Codex처럼 형식이 다른 secret은 자연히 false가 된다.
     ///
-    /// ★ 예외 하나: 이전 저장본의 refresh 토큰이 **키는 있는데 빈 문자열**이면, 다음에 비지 않은
-    ///   토큰이 오는 것은 새 로그인뿐이다(빈 토큰으로는 refresh할 수 없다). claude가 로그아웃·재로그인
-    ///   도중 토큰만 비운 blob을 쓰고 그걸 되저장한 프로필이, CLI에서 다시 로그인해 멀쩡해진 뒤에도
-    ///   "재로그인 필요"를 달고 있었다(실측 2026-09-24, 실패 기록 24). 키가 **없는** blob은 여전히
+    /// ★ 예외 하나: 이전 저장본의 refresh 토큰이 **키는 있는데 빈 문자열**이면(claude가 invalid_grant
+    ///   뒤 죽은 토큰을 지운 모양), 다음에 오는 비지 않은 토큰은 그 죽은 토큰의 회전일 수 없다. 새 로그인이거나,
+    ///   claude의 refresh 저장 규칙(Keychain의 refresh 토큰이 요청에 쓴 토큰과 같거나 **빈 문자열일 때만**
+    ///   쓴다)에 따라 다른 세션의 refresh 결과가 빈자리를 채운 것이다 — 어느 쪽이든 살아 있는 토큰이다.
+    ///   다른 세션이 채운 토큰이 다른 조직의 것일 수는 있지만, 그건 저장 전에 `liveSnapshotVerdict`와
+    ///   폴백 refresh의 조직 대조가 거른다. 빈 토큰을 되저장했던 프로필이 CLI에서 다시 로그인해 멀쩡해진
+    ///   뒤에도 "재로그인 필요"를 달고 있었다(실측 2026-09-24, 실패 기록 24). 키가 **없는** blob은 여전히
     ///   모르는 것으로 보고 유지한다.
     public static func refreshTokenRotated(previous: Data?, next: Data) -> Bool {
         guard let previous, let new = refreshToken(fromSecret: next) else { return false }
