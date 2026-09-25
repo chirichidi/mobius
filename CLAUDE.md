@@ -64,8 +64,9 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
 - **★ 토큰과 신원은 쓰는 경로가 다르다 (claude 2.1.281 바이너리 실측, 2026-09-24)** — 그래서 둘이
   서로 다른 조직을 가리키는 순간이 생긴다(실패 기록 24).
   - refresh는 토큰만 Keychain에 쓴다. 응답에 `organization.uuid`가 오지만 oauthAccount의
-    `organizationUuid`·`emailAddress`는 고치지 않고, 프로필을 다시 받은 경우에도 `seatTier`·
-    `profileFetchedAt` 같은 일부 필드만 덮어쓴다. blob의 `subscriptionType`은 "프로필을 다시 받은 값,
+    `organizationUuid`·`emailAddress`는 고치지 않고, 프로필을 다시 받은 경우에도 displayName·billingType·
+    `seatTier`·`profileFetchedAt` 같은 일부 필드만 **그 토큰의 프로필에서** 덮어쓴다(`organizationUuid`·
+    `organizationType`·`organizationName`은 병합 대상이 아니다). blob의 `subscriptionType`은 "프로필을 다시 받은 값,
     없으면 지금 저장된 토큰의 값"이다. 로그인 때 조직 종류(`claude_team`→`team` 등)에서 만들고, 조직
     종류를 모르면 null이다(2026-09-24 실측 환경: Team `"team"`, 개인 Max `"max"`).
   - refresh 결과 저장은 **CAS**다. Keychain의 refresh 토큰이 요청에 쓴 토큰과 같거나 **빈 문자열일 때만**
@@ -82,8 +83,12 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     채운다. 로그인은 이전 refresh 토큰을 폐기(revoke)하지 않는다. 폐기는 `/logout`에서만 한다.
   - 각 claude 프로세스는 Keychain 읽기를 **30초** 캐시한다. 전환 직후 옛 토큰을 캐시한 세션이
     bootstrap하면 oauthAccount만 옛 조직으로 돌아간다.
-  - 그러므로 조직과 같은 시점에 바뀌는 신호는 `seatTier`다(좌석형이면 문자열, 개인 구독이면 null —
-    개인 구독 쪽은 2026-09-24 실측 한 번이 근거). `organizationType`은 로그인 직후 한동안 비어 있을 수 있다.
+  - 그러므로 oauthAccount가 좌석형 조직인지는 **`organizationType`을 먼저** 보고, 없을 때만 `seatTier`를 본다.
+    `organizationType`은 bootstrap이 `organizationUuid`와 함께 쓰고 로그인 직후(④ 전)에는 아예 없으므로, 있으면
+    `organizationUuid`와 짝이 맞다. `seatTier`는 로그인·bootstrap이 `organizationUuid`와 함께 쓰지만 refresh가 그
+    토큰의 값으로 따로 덮어쓸 수 있다 — 신원이 개인 Max로 되돌려진 라이브에서 Team 토큰이 refresh되면 seatTier만
+    `"team_tier_1"`이 된다(리뷰 3회차 P1). organizationType이 없는 로그인 직후에는 seatTier가 로그인이 쓴 값이다
+    (좌석형이면 문자열, 개인 구독이면 null — 개인 구독 쪽은 2026-09-24 실측 한 번이 근거).
 - **Keychain blob에는 MCP 서버 OAuth 토큰(`mcpOAuth`)도 들어 있다.** 전환은 blob을 통째로 바꾸므로
   MCP 토큰도 그 프로필이 저장한 시점의 값으로 돌아간다. MCP 토큰은 Claude 계정과 무관한데, 그 사이
   회전했다면 되돌아간 쪽은 죽은 토큰이다(2026-09-24 기준 미해결, 관찰된 피해 없음).
@@ -715,13 +720,17 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     capture)가 `ProviderConfigIO.canStoreLiveSecret`을 먼저 본다. Claude 판정은
     `ClaudeConfigIO.liveSnapshotVerdict`이고 네트워크를 쓰지 않는다. 로그인이 없는 blob(빈 refresh
     토큰, `claudeAiOauth` 없이 `mcpOAuth`만 남음, 빈 객체 `{}`)은 `.loggedOut`, blob의 `subscriptionType`이
-    좌석형(team·enterprise)인지와 oauthAccount가 좌석형 조직(`seatTier` 우선, 없으면
-    `organizationType`)인지가 다르면 `.organizationMismatch`다. 어긋나면 저장도 활성 이동도 하지 않고
-    다음 틱에 다시 본다. 단 reconcile은 거부한 라이브의 신원 지문(oauthAccount 블록)을 기억해, 지문이 바뀌거나
-    5분이 지나기 전에는 Keychain을 다시 읽지 않는다. 거부되는 상태는 새 claude 세션이 bootstrap할 때까지 이어질 수
-    있어서, 그대로 두면 15초마다 Keychain을 두 번 읽는다(실패 기록 3·3b, 리뷰 지적). "라이브 이메일이 활성과 같으면
-    건너뛴다"로 막으면 같은 이메일의 다른 조직으로 앱 밖에서 로그인한 경우를 따라가지 못해 쓰지 않았다. 같은 이메일의 개인 조직은 하나뿐이라 회사↔개인 혼입을 정확히 잡고, Pro→Max처럼
-    개인 구독 안에서 요금제가 바뀐 경우는 걸리지 않는다. `subscriptionType`이 null인 계보는 판정할 수 없다.
+    좌석형(team·enterprise)인지와 oauthAccount가 좌석형 조직(`organizationType` 우선, 없으면
+    `seatTier` — 핵심 사실 참조)인지가 다르면 `.organizationMismatch`다. 같은 이메일의 개인 조직은 하나뿐이라
+    회사↔개인 혼입을 정확히 잡고, Pro→Max처럼 개인 구독 안에서 요금제가 바뀐 경우는 걸리지 않는다.
+    `subscriptionType`이 null인 계보는 판정할 수 없다. 어긋나면 저장도 활성 이동도 하지 않고 다음 틱에 다시 본다.
+    단 reconcile과 adopt는 거부한 라이브의 신원 지문(oauthAccount 블록)을 기억해, 지문이 바뀌거나 간격이 지나기
+    전에는 Keychain을 다시 읽지 않는다. 거부되는 상태는 새 claude 세션이 bootstrap할 때까지 이어질 수 있어서, 그대로
+    두면 15초마다 Keychain을 두 번 읽는다(실패 기록 3·3b, upstream 리뷰). 간격은 거부 사유별이다. 조직이 어긋난
+    거부는 5분이다 — 같은 계보 안의 회전은 판정을 바꾸지 않고, 다른 계보로 바뀌는 일은 CAS 규칙상 빈 토큰일 때만
+    생긴다. 로그인이 없는 거부(빈 토큰)는 1분이다 — 빈 자리는 다른 세션의 refresh가 신원을 그대로 둔 채 채울 수 있어,
+    오래 기다리면 활성 표시가 실제 로그인과 어긋난다. "라이브 이메일이 활성과 같으면 건너뛴다"로 막으면 같은 이메일의
+    다른 조직으로 앱 밖에서 로그인한 경우를 따라가지 못해 쓰지 않았다.
     (b) 이미 섞인 저장본은 **refresh하기 전에** 잡는다. 섞인 저장본은 대개 라이브나 다른 카드와 같은 refresh
     토큰을 쥐고 있어서, 회전하는 순간 올바른 쪽의 계보까지 끊긴다(리뷰에서 드러난 P1). 그래서
     `FallbackAuthChecker`는 저장 스냅샷에 같은 판정을 적용해 어긋나면 네트워크 없이 `.mixedSnapshot`으로
@@ -746,7 +755,8 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     (e) 표시: Team 등급이 organizationRateLimitTier의 내부 코드명("default_raven" → "Raven")으로
     뜨던 것을 좌석형이면 조직 한도 등급을 보지 않도록 바꾸고("Team"), 좌석형 판정은 저장 판정과 같은
     `isSeatOrganization`으로 한다 — 로그인 직후 organizationType이 비어 있을 때 LoginFlow가 등록한 카드도
-    seatTier의 앞 낱말로 "Team"이 된다(예전 "Team Tier 1" 표기도 "Team"으로 통일). `capitalized`가 만들던 "Max 20X"를 "Max 20x"로
+    seatTier의 앞 낱말로 "Team"이 된다(예전 "Team Tier 1" 표기도 "Team"으로 통일). refresh가 seatTier만 덮어쓴
+    개인 구독 신원은 organizationType이 우선이라 개인 구독 등급으로 남는다. `capitalized`가 만들던 "Max 20X"를 "Max 20x"로
     고쳤다. 기존 프로필은 `Switcher.refreshTierLabels`가 시작 때 저장 스냅샷에서 다시 계산한다. 한도에
     걸린 카드는 조직·등급 줄이 카운트다운으로 바뀌어 두 카드가 닉네임 말고는 구분되지 않았으므로,
     카운트다운 뒤에 조직·등급을 붙인다.

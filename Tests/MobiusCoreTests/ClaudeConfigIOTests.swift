@@ -155,10 +155,26 @@ final class ClaudeConfigIOTests: XCTestCase {
                        .organizationMismatch)
     }
 
-    /// seatTier가 organizationType보다 먼저다 — 로그인 때 organizationUuid와 함께 쓰이는 쪽이 seatTier다.
-    func testVerdictPrefersSeatTierOverOrganizationType() {
-        let staleType = #"{"emailAddress":"p@x.com","organizationType":"claude_max","seatTier":"team_tier_1","organizationUuid":"org-team"}"#
-        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: staleType)), .storable)
+    /// organizationType이 seatTier보다 먼저다(리뷰 3회차 P1). refresh는 프로필을 다시 받으면 그 토큰의 프로필에서
+    /// seatTier만 덮어쓰고 organizationUuid·organizationType은 두므로(claude 2.1.281 실측), 개인 Max로 되돌려진
+    /// 신원에 Team 토큰의 refresh가 seatTier만 `"team_tier_1"`로 바꿔 놓는다. seatTier를 먼저 보면 이 둘이
+    /// 짝이 맞는 것으로 판정돼 Team 토큰이 Max 프로필에 저장된다.
+    func testVerdictPrefersOrganizationTypeOverSeatTierOverwrittenByRefresh() throws {
+        let seatOverwritten = #"{"emailAddress":"p@x.com","organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x","seatTier":"team_tier_1","organizationUuid":"org-max"}"#
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: seatOverwritten)),
+                       .organizationMismatch)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "max", account: seatOverwritten)),
+                       .storable)
+        let block = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(seatOverwritten.utf8)) as? [String: Any])
+        XCTAssertEqual(ClaudeConfigIO.tierDescription(from: block), "Max 20x", "등급도 개인 구독으로 남는다")
+    }
+
+    /// organizationType이 아직 없는 로그인 직후에는 seatTier로 판정한다 — 그 값은 로그인이 organizationUuid와 함께 쓴 것이다.
+    func testVerdictUsesSeatTierWhileOrganizationTypeIsMissing() {
+        let justLoggedIn = #"{"emailAddress":"p@x.com","seatTier":"team_tier_1","organizationUuid":"org-team"}"#
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "team", account: justLoggedIn)), .storable)
+        XCTAssertEqual(ClaudeConfigIO.liveSnapshotVerdict(liveSnap(subscription: "max", account: justLoggedIn)),
+                       .organizationMismatch)
     }
 
     /// 개인 구독 안에서 요금제가 바뀌어도(Pro→Max) 막지 않는다 — claude는 refresh 때 blob의

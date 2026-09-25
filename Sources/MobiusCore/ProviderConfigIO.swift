@@ -44,8 +44,8 @@ public protocol ProviderConfigIO: Sendable {
     /// 표시용 메타데이터를 포함한 신원 (등록/adopt 시). 로그아웃 상태면 nil.
     func liveIdentity() throws -> ProviderIdentity?
 
-    /// 라이브 신원 쪽의 지문. `liveAccountKey`와 같은 값싼 경로(승인창 없음)여야 한다. reconcile이 저장을
-    /// 거부한 라이브가 그대로인지 볼 때 쓴다(`Switcher.reconcile`). 로그아웃 상태면 nil.
+    /// 라이브 신원 쪽의 지문. `liveAccountKey`와 같은 값싼 경로(승인창 없음)여야 한다. reconcile·adopt가 저장을
+    /// 거부한 라이브가 그대로인지 볼 때 쓴다(`Switcher`). 로그아웃 상태면 nil.
     func liveIdentityFingerprint() throws -> Data?
 
     /// 라이브 상태(비밀+이메일)를 간격을 두고 두 번 읽어 값이 일치할 때만 반환한다.
@@ -68,6 +68,10 @@ public protocol ProviderConfigIO: Sendable {
     /// 짝짓기 때문에 필요하다(실패 기록 24). 신원이 토큰 안에 있는 프로바이더는 기본 구현으로 충분하다.
     func canStoreLiveSecret(_ data: Data) -> Bool
 
+    /// 저장할 수 없는 라이브 secret이 **로그인이 없는 상태**(빈 토큰 등)라서 거부된 것인가. reconcile·adopt가
+    /// 거부한 라이브를 얼마 동안 다시 읽지 않을지 정할 때 쓴다(`Switcher`). 기본 false.
+    func liveSecretLacksLogin(_ data: Data) -> Bool
+
     /// 저장할 수 없는 라이브 secret(`canStoreLiveSecret`이 false)의 **토큰**이 `stored`(어느 프로필의
     /// 저장본)와 같은 계정의 것으로 보이면, 토큰은 라이브의 것을 쓰고 신원은 `stored`의 것을 쓴 secret을
     /// 돌려준다. 아니면 nil. Claude에서 신원만 옛 조직으로 되돌려진 경우를 보정하는 데 쓴다(실패 기록 24).
@@ -86,6 +90,7 @@ public protocol ProviderConfigIO: Sendable {
 extension ProviderConfigIO {
     /// 기본: 항상 저장 가능 — Codex auth.json은 신원(JWT)이 토큰과 한 파일에 있어 어긋날 수 없다.
     public func canStoreLiveSecret(_ data: Data) -> Bool { true }
+    public func liveSecretLacksLogin(_ data: Data) -> Bool { false }
 
     /// 기본: 보정 없음 — 신원이 토큰과 한 파일에 있는 프로바이더는 어긋날 일이 없다.
     public func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data? { nil }

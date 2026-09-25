@@ -166,7 +166,8 @@ extension ClaudeConfigIO: ProviderConfigIO {
     /// ★ 좌석형인지는 `isSeatOrganization` **한 곳**에서 정한다 — 저장 판정과 같은 규칙이어야 한다.
     ///   로그인 직후에는 organizationType이 비어 있고 seatTier만 있어서(아래 판정의 주석), organizationType만
     ///   보면 LoginFlow가 막 등록한 Team 카드가 "Raven"이나 "Team Tier 1"로 뜬다(리뷰 지적). 이때는 seatTier의
-    ///   앞 낱말(`"team_tier_1"` → "Team")을 쓴다 — 다른 Team 카드와 같은 표기가 된다.
+    ///   앞 낱말(`"team_tier_1"` → "Team")을 쓴다 — 다른 Team 카드와 같은 표기가 된다. 판정이 organizationType을
+    ///   먼저 보므로, refresh가 seatTier만 덮어쓴 개인 구독 신원은 개인 구독 등급으로 남는다.
     static func tierDescription(from block: [String: Any]) -> String {
         if isSeatOrganization(oauthBlock: block) == true {
             switch block["organizationType"] as? String {
@@ -189,19 +190,27 @@ extension ClaudeConfigIO: ProviderConfigIO {
     }
 
     /// oauthAccount 블록이 좌석형 조직(Team·Enterprise)을 가리키는가. 개인 구독이면 false, 모르면 nil.
-    /// ★ `seatTier`를 먼저 본다 — claude 2.1.281은 로그인 때 organizationUuid와 seatTier를 **한 번의
-    ///   쓰기**로 갱신하지만 organizationType은 나중(bootstrap)에야 채운다(바이너리 실측). 조직과
-    ///   같은 시점에 바뀌는 신호가 seatTier다. seatTier가 없거나 null이면 organizationType으로 폴백한다.
-    /// ★ 전제: 개인 구독의 seatTier는 null이다. 근거는 2026-09-24 실측 한 번(개인 Max: null, Team:
-    ///   `"team_tier_1"`)뿐이다. 개인 구독에도 seatTier가 채워지는 날이 오면 개인 구독 라이브가 계속
-    ///   `.organizationMismatch`가 되어 동기화가 멈춘다 — 그때는 organizationType을 먼저 보도록 되돌린다.
+    /// ★ `organizationType`을 먼저 보고, 없을 때만 `seatTier`를 본다. 판정 근거는 "organizationUuid와 **같은
+    ///   쓰기**로 바뀌는 필드인가"다(claude 2.1.281 바이너리 실측).
+    ///   - organizationType은 bootstrap이 organizationUuid·organizationName·seatTier와 함께 쓴다. 로그인은 ①에서
+    ///     oauthAccount를 지우므로 로그인 직후(④ bootstrap 전)에는 아예 없다. 즉 있으면 organizationUuid와 짝이 맞다.
+    ///   - seatTier는 로그인(②)과 bootstrap이 organizationUuid와 함께 쓰지만, **refresh도** 프로필을 다시 받으면
+    ///     그 토큰의 프로필에서 seatTier만 덮어쓴다(organizationUuid·organizationType은 병합 대상이 아니다).
+    ///     그래서 신원이 개인 Max로 되돌려진 라이브에서 Team 토큰이 refresh되면 seatTier만 `"team_tier_1"`이
+    ///     되고, seatTier를 먼저 보면 Team 토큰과 Max 신원이 짝이 맞는 것으로 판정돼 사고와 같은 방향의
+    ///     섞인 저장이 다시 열린다(리뷰 3회차 P1).
+    ///   organizationType이 없는 구간(로그인 직후)에는 seatTier를 쓴다 — 그 값은 로그인이 organizationUuid와
+    ///   함께 쓴 것이다.
+    /// ★ 전제: 개인 구독의 seatTier는 null이다(2026-09-24 실측 한 번: 개인 Max null, Team `"team_tier_1"`).
+    ///   이제 이 전제는 organizationType이 없는 짧은 구간에만 쓰인다.
     static func isSeatOrganization(oauthBlock block: [String: Any]) -> Bool? {
-        if let seat = block["seatTier"] as? String, !seat.isEmpty { return true }
         switch block["organizationType"] as? String {
         case "claude_team", "claude_enterprise": return true
         case "claude_max", "claude_pro": return false
-        default: return nil
+        default: break
         }
+        if let seat = block["seatTier"] as? String, !seat.isEmpty { return true }
+        return nil
     }
 
     /// 라이브 스냅샷을 프로필에 저장해도 되는가 — 토큰(Keychain)과 신원(~/.claude.json)이
@@ -246,6 +255,11 @@ extension ClaudeConfigIO: ProviderConfigIO {
     public func canStoreLiveSecret(_ data: Data) -> Bool {
         guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
         return Self.liveSnapshotVerdict(snap) == .storable
+    }
+
+    public func liveSecretLacksLogin(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .loggedOut
     }
 
     /// 어긋난 라이브(`.organizationMismatch`)의 토큰 종류(좌석형/개인 구독)가 `stored`의 oauthAccount
