@@ -87,8 +87,10 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     `organizationType`은 bootstrap이 `organizationUuid`와 함께 쓰고 로그인 직후(④ 전)에는 아예 없으므로, 있으면
     `organizationUuid`와 짝이 맞다. `seatTier`는 로그인·bootstrap이 `organizationUuid`와 함께 쓰지만 refresh가 그
     토큰의 값으로 따로 덮어쓸 수 있다 — 신원이 개인 Max로 되돌려진 라이브에서 Team 토큰이 refresh되면 seatTier만
-    `"team_tier_1"`이 된다(리뷰 3회차 P1). organizationType이 없는 로그인 직후에는 seatTier가 로그인이 쓴 값이다
-    (좌석형이면 문자열, 개인 구독이면 null — 개인 구독 쪽은 2026-09-24 실측 한 번이 근거).
+    `"team_tier_1"`이 된다(리뷰 3회차 P1). refresh의 이 병합은 Keychain CAS 저장보다 먼저 일어나고 CAS가 저장을
+    포기해도 남는다. organizationType이 없는 로그인 직후에는 seatTier가 대개 로그인이 쓴 값이다(좌석형이면
+    문자열, 개인 구독이면 null — 개인 구독 쪽은 2026-09-24 실측 한 번이 근거). 다만 그 구간에 refresh와 전환이
+    겹치면 다른 토큰의 값일 수 있고, 그때는 대개 거짓 거부로 끝나 다음 bootstrap이 풀어 준다.
 - **Keychain blob에는 MCP 서버 OAuth 토큰(`mcpOAuth`)도 들어 있다.** 전환은 blob을 통째로 바꾸므로
   MCP 토큰도 그 프로필이 저장한 시점의 값으로 돌아간다. MCP 토큰은 Claude 계정과 무관한데, 그 사이
   회전했다면 되돌아간 쪽은 죽은 토큰이다(2026-09-24 기준 미해결, 관찰된 피해 없음).

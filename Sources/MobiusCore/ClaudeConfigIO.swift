@@ -199,8 +199,10 @@ extension ClaudeConfigIO: ProviderConfigIO {
     ///     그래서 신원이 개인 Max로 되돌려진 라이브에서 Team 토큰이 refresh되면 seatTier만 `"team_tier_1"`이
     ///     되고, seatTier를 먼저 보면 Team 토큰과 Max 신원이 짝이 맞는 것으로 판정돼 사고와 같은 방향의
     ///     섞인 저장이 다시 열린다(리뷰 3회차 P1).
-    ///   organizationType이 없는 구간(로그인 직후)에는 seatTier를 쓴다 — 그 값은 로그인이 organizationUuid와
-    ///   함께 쓴 것이다.
+    ///   organizationType이 없는 구간(로그인 직후, 또는 그 구간에 등록한 저장본을 설치한 뒤 다음 bootstrap
+    ///   전)에는 seatTier를 쓴다. 대개 로그인이 organizationUuid와 함께 쓴 값이지만, refresh의 병합은 CAS
+    ///   결과와 상관없이 일어나므로 그 사이 전환이 겹치면 다른 토큰의 값일 수 있다. 그때는 대개 거짓 거부로
+    ///   끝나고 bootstrap이 organizationType을 채우면 풀린다(리뷰 4회차 P3-1).
     /// ★ 전제: 개인 구독의 seatTier는 null이다(2026-09-24 실측 한 번: 개인 Max null, Team `"team_tier_1"`).
     ///   이제 이 전제는 organizationType이 없는 짧은 구간에만 쓰인다.
     static func isSeatOrganization(oauthBlock block: [String: Any]) -> Bool? {

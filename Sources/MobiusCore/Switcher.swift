@@ -35,9 +35,13 @@ public final class Switcher: @unchecked Sendable {
     /// 이 상태에서 신원은 그대로이고 토큰만 다른 계보로 바뀌는 일은 드물다 — refresh 저장이 CAS라 다른 세션은
     /// Keychain 토큰이 빈 문자열일 때만 덮을 수 있다(핵심 사실 "토큰과 신원은 쓰는 경로가 다르다"). 같은
     /// 계보 안의 회전은 판정 결과를 바꾸지 않으므로, 이 간격은 알 수 없는 경로에 대한 상한일 뿐이다.
+    /// 거부 사유는 처음 거부한 시점에 정해진다. 불일치로 기억된 뒤 토큰이 invalid_grant로 비워지고 그 자리를
+    /// 다른 세션의 refresh가 채우면 이 긴 간격을 따른다 — 그 경로는 refresh 요청이 나가 있는 동안 비워질
+    /// 때만 생겨 드물다(리뷰 4회차 P3-2).
     public var deferredLiveRecheckInterval: TimeInterval = 5 * 60
-    /// 로그인이 없어 거부한 라이브(빈 refresh 토큰 등)를 다시 확인하는 간격. 빈 자리는 다른 세션의 refresh가
-    /// CAS로 채울 수 있고, 그때 신원(oauthAccount)은 그대로라 지문으로는 알 수 없다. 늦게 따라가면 그동안
+    /// 로그인이 없어 거부한 라이브(빈 refresh 토큰 등)를 다시 확인하는 간격. 빈 자리는 refresh 요청이 이미
+    /// 나간 뒤에 비워진 경우 그 refresh가 CAS로 채울 수 있고(refresh는 락을 잡은 채 그 순간 Keychain에 있는
+    /// 토큰으로만 한다), 그때 신원(oauthAccount)은 그대로라 지문으로는 알 수 없다. 늦게 따라가면 그동안
     /// 활성 표시가 실제 로그인과 달라지고 실제 라이브 계정이 폴백으로 취급되어 refresh 대상이 될 수 있으므로
     /// 짧게 둔다(AppState의 "reconcile에 유예는 넣지 않는다"와 같은 이유). 15초마다 읽던 것의 1/4이다.
     public var loggedOutLiveRecheckInterval: TimeInterval = 60

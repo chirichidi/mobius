@@ -429,7 +429,7 @@ final class SwitcherTests: XCTestCase {
         let afterWrite = kc.readsByService[service, default: 0]
         try await switcher.reconcile()
         XCTAssertEqual(kc.readsByService[service, default: 0], afterWrite, "간격 안에서는 다시 읽지 않는다")
-        XCTAssertGreaterThanOrEqual(afterWrite, afterFirst)
+        XCTAssertEqual(afterWrite, afterFirst, "라이브 쓰기 자체는 Keychain 읽기를 일으키지 않는다")
 
         switcher.deferredLiveRecheckInterval = 0
         try await switcher.reconcile()
