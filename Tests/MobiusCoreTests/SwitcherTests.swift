@@ -400,6 +400,11 @@ final class SwitcherTests: XCTestCase {
 
     /// 거부한 뒤라도 다시 로그인하면(로그인은 oauthAccount를 다시 쓴다) 곧바로 따라간다. "라이브 이메일이 활성과
     /// 같으면 조기 반환"으로 막았다면, 같은 이메일의 다른 조직으로 앱 밖에서 로그인한 이 경우를 놓친다.
+    /// ★ 이 테스트는 "재로그인하면 신원 지문이 바뀐다"를 가정한다(`profileFetchedAt`을 넣어 흉내 낸다). claude
+    ///   2.1.283 실측: 같은 조직으로 `claude auth login`을 다시 하면 oauthAccount는 `profileFetchedAt`만 로그인
+    ///   시각으로 바뀌고 나머지는 바이트 단위로 같다(바이너리에서도 로그인 경로가 `profileFetchedAt: Date.now()`를
+    ///   쓴다). 이 필드가 빠지는 버전이 나오면, 같은 조직 재로그인은 불일치로 기억된 동안(최대
+    ///   `deferredLiveRecheckInterval`) 늦게 따라간다 — 토큰은 새 계보라 손상되지 않는다.
     func testReconcileFollowsReloginAfterRejectedLive() async throws {
         let (team, _) = try setUpTwoOrganizations()
         try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
