@@ -42,6 +42,7 @@ Sources/MobiusCore/       앱·CLI 공유 코어 (전부 의존성 주입 → �
   UsageFetcher.swift       Claude usage 엔드포인트 조회 (게이지용, 팝오버 열 때만; Codex는 로그로 대체)
                            모델 스코프 주간 한도(weekly_scoped)도 파싱 → ScopedUsageLimit
   UsageRateLimitBackoff.swift usage 엔드포인트 429의 계정별 대기 시각 (모든 조회 경로가 먼저 본다)
+  PendingHitTrigger.swift  판정 못 한 창 소진 트리거와 그 갱신 규칙 (hit 신뢰 판정은 도착 순간 한 번)
   SyncEngine.swift         멀티 Mac 동기화 (클라우드 폴더 미러, ★ 아래 '동기화 원칙')
   UpdateChecker.swift      GitHub 릴리스 업데이트 확인 (하루 1회)
 Sources/mobius/           CLI (list/switch/status/capture/auto)
@@ -544,8 +545,8 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     ★ **`weekly_scoped`의 `resets_at`은 null로 온다**(라이브 응답 실측, 2026-08-16). 그러면
     `scopedExhaustionHit`의 `compactMap(\.resetsAt)`이 조용히 떨어뜨려 "여유"와 구분되지
     않는다 → `hasUnresolvableScopedLimit`으로 `.inconclusive` 처리(그 모델로 막힌 사용자의
-    hit이 버려지고 백오프까지 걸리는 것 방지). 보류는 TTL 15분 뒤 최후 폴백으로 기록되고
-    그 뒤 `.skipAlreadyRecorded`로 끊겨 **유한하다**.
+    hit이 버려지고 백오프까지 걸리는 것 방지). 보류는 수명(20분) 뒤 최후 폴백으로 넘어가(전환 직후
+    도착한 hit이면 기록 없이 버린다) 그 뒤 `.skipAlreadyRecorded`로 끊겨 **유한하다**.
     ★ **막다른 길로 확인된 것**(제보자가 대신 파 줌): `~/.claude.json`의
     `cachedUsageUtilization`은 `accountUuid`가 있어 네트워크 0 판정이 가능해 보이지만,
     번들 구현상 **라이브 계정만 기록 + 계정 불일치 시 캐시 삭제 + 5분 쓰로틀 + 1h TTL**이라
@@ -557,7 +558,7 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     경로뿐이고 그건 이 경로로 안 온다). 그래서 모델 한도 때문에 보류된 트리거를 15분 뒤
     최후 폴백이 그대로 기록하면 **계정 전체 소진**이 된다 → 메뉴바 빨강, CLI 라벨 오류,
     그리고 `autoSwitchMayLeave`가 `isLimited`에서 **핀을 보기 전에 단락**하므로 사용자가
-    고정해 둔 계정에서 강제로 밀려난다. → `PendingTrigger.lastInconclusiveWasModelScoped`
+    고정해 둔 계정에서 강제로 밀려난다. → `PendingHitTrigger.lastInconclusiveWasModelScoped`
     (판별은 `HitAttribution.inconclusiveIsModelScoped` — 테스트 가능하게 코어 순수 함수).
     ★ **`pendingHitVerifyTTL`(20분)과 `modelLimitedSteadyRecheck`(15분)은 일부러 벌려 둔다** —
     같은 값이면 "다시 조회할 때"와 "포기할 때"가 같은 틱에 겹치고 TTL 검사가 먼저라
@@ -569,10 +570,12 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     **기다려도 새 증거가 되지 않는다.** 보류했다가 창이 지난 뒤 같은 스냅샷으로 판정하면
     신뢰 창은 오귀인을 5분 미루기만 한다. 진짜 모델 한도 사용자는 창이 지난 뒤 **새로
     도착한 hit**으로 기록된다 — 그게 "전환과 무관하게 난 신호"라는 유일한 증거다.
-    ★ **검증이 끝내 불가능하면(15분) 로그 hit을 최후 폴백으로 쓴다 — 단 최근 전환이 없을 때만**
-    (`giveUpVerification`). 이 수정 이후 소진 기록이 **usage 엔드포인트에만** 의존하게 돼,
-    API가 죽으면 claude가 멀쩡해도 자동 전환이 통째로 멈춘다(수정 전엔 로그만으로 네트워크
-    없이 전환했다). 오귀인은 전환 직후에만 생기므로 그 구간만 피하면 로그 귀속은 사실상 옳다.
+    ★ **검증이 끝내 불가능하면(수명 20분) 로그 hit을 최후 폴백으로 쓴다 — 단 그 hit이 전환 직후에
+    도착하지 않았을 때만**(`giveUpVerification`, `PendingHitTrigger.hitTrusted`). 이 수정 이후 소진
+    기록이 **usage 엔드포인트에만** 의존하게 돼, API가 죽으면 claude가 멀쩡해도 자동 전환이 통째로
+    멈춘다(수정 전엔 로그만으로 네트워크 없이 전환했다). 오귀인은 전환 직후에 도착한 hit에서만 생기므로
+    그 hit만 피하면 로그 귀속은 사실상 옳다. 판정은 hit이 도착하는 순간에 한 번 한다 — 처음에는
+    포기하는 시각으로 쟀는데, 그러면 이 조건은 거의 늘 참이었다(실패 기록 25에서 고침).
     ★ **P3(월 지출) 교차확인도 이 경로로 합쳤다** — 전용 코드는 나이 기반 캐시(4분)를 쓰고
     재시도 장치가 없어, 같은 판정을 하면서 이 PR의 보호를 하나도 못 받고 있었다.
     ★ **모델 한도 기록에는 "어느 모델인지"가 없다**(RateLimitInfo에 모델 식별자 없음) —
@@ -702,9 +705,23 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
     (리뷰 지적). 수명 동안 조회를 쉬다가 수명이 다하면 최후 폴백으로 끝나므로, 결과를 20분 미루기만
     한다 — claude도 한도에 닿을 때 이 엔드포인트를 불러서, 429는 활성 계정이 막힌 바로 그 순간에
     몰리기 쉽다. 그래서 다시 조회할 시각이 수명 끝 이후면 최후 폴백을 바로 쓴다
-    (`HitAttribution.givesUpEarlyWhileRateLimited`). 단 **최근 전환이 없을 때만** 앞당긴다 — 최후
-    폴백은 전환 직후면 아무것도 기록하지 않고 트리거를 버리므로, 그때 앞당기면 수명 끝에서는
-    기록됐을 hit이 사라진다. 계정 단위인 이유는 제한이 토큰에 걸리기 때문이다 —
+    (`HitAttribution.givesUpEarlyWhileRateLimited`). 단 최후 폴백이 **그 hit을 기록할 때만** 앞당긴다.
+    ★ 최후 폴백의 "최근 전환 없음" 검사는 **hit이 도착하는 순간에** 그때의 마지막 전환으로 한 번
+    판정해 트리거에 담는다(`PendingHitTrigger.hitTrusted`, 리뷰 지적). 처음에는 포기하는 시각
+    (now)으로 쟀는데, 트리거는 수명이나 429 대기 동안 붙들려 있으므로 전환 17초 뒤에 도착한 오귀인 hit도
+    전환 5분 뒤에는 기록됐다 — 실패 기록 21의 폴백부터 있던 결함이고, 이 PR에서 이 경로를 더 자주, 더
+    빨리 타게 되어 드러났다. 도착 시각만 들고 있다가 그때그때의 마지막 전환과 비교해도 안 된다 — hit이
+    도착한 **뒤에** 사용자가 전환하면 차이가 음수가 되어 진짜 소진을 끝내 버린다(셀프리뷰 지적).
+    모델 전용 한도를 귀속 증거로 믿을지(`trustModelScope`)도 같은 값을 쓴다 — 검증 시각으로 재면, 첫
+    조회가 429로 전환 5분 뒤까지 미뤄질 때 다른 계정의 에러가 이 계정의 모델 한도로 기록된다.
+    트리거를 바꾸는 규칙(새 hit, 백오프 해제)은 테스트할 수 있게 코어의 `PendingHitTrigger`로 옮겼다.
+    새 창 hit은 트리거의 hit과 판정을 바꾸되, 믿을 만한 hit을 믿지 못할 hit으로 덮어쓰지는 않는다.
+    `lastInconclusiveWasModelScoped`는 트리거가 바뀌어도 물려받는다 — 예전에는 새 hit이 올 때마다
+    false로 돌아가, 앞당긴 폴백이 모델 한도만 걸린 계정을 계정 전체 소진으로 기록할 수 있었다(#21부터).
+    그래서 전환 직후 도착한 hit은 앞당기든 수명 끝이든 기록되지 않고, 앞당기지도 않는다 — 트리거를
+    붙들어 두면 그 뒤에 온 hit(전환과 무관한 신호)이 트리거의 hit을 바꿔 다음 재시도에서 곧바로
+    기록된다. 일찍 버리면 그 hit이 포기 뒤 백오프에 걸린다.
+    계정 단위인 이유는 제한이 토큰에 걸리기 때문이다 —
     한 계정이 막혔다고 멀쩡한 폴백의 게이지와 후보 확인까지 멈추면 안 된다. 대기 시각은 인메모리라
     앱을 다시 켜면 한 번 더 부른다(다시 429면 다시 기록된다).
     ★ **다른 클라이언트의 User-Agent를 흉내 내 제한을 피하지 않는다.** 서비스가 건 제한을 우회하는
