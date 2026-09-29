@@ -181,7 +181,7 @@ final class SwitcherTests: XCTestCase {
         let healed = store.file.accounts.first { $0.id == mislabeled.id }
         XCTAssertEqual(healed?.organizationUuid, "org-personal")
         XCTAssertEqual(healed?.organizationName, "m@x.com's Organization")
-        XCTAssertEqual(healed?.tierDescription, "Max 20X")
+        XCTAssertEqual(healed?.tierDescription, "Max 20x", "`capitalized`가 만들던 \"20X\"가 아니다")
         XCTAssertEqual(healed?.organizationLabel, "",
                        "개인 구독의 자동 생성 조직 이름은 카드에 안 띄운다")
     }
@@ -323,5 +323,323 @@ final class SwitcherTests: XCTestCase {
 
         XCTAssertEqual(store.file.activeAccountID, work.id)
         XCTAssertFalse(reauthFlag(personal.id))
+    }
+
+    // MARK: 토큰과 신원이 어긋난 라이브 (실패 기록 24)
+    // 같은 이메일의 회사 Team과 개인 Max. 토큰(Keychain)과 oauthAccount(~/.claude.json)는 claude의
+    // 서로 다른 경로가 따로 쓰므로, 한쪽 조직의 토큰이 다른 조직의 oauthAccount와 함께 놓이는 순간이 있다.
+
+    static let teamAccount = #"{"emailAddress":"t@x.com","organizationName":"acme-team","organizationType":"claude_team","organizationRateLimitTier":"default_raven","seatTier":"team_tier_1","organizationUuid":"org-team"}"#
+    static let maxAccount = #"{"emailAddress":"t@x.com","organizationName":"t@x.com's Organization","organizationType":"claude_max","organizationRateLimitTier":"default_claude_max_20x","seatTier":null,"organizationUuid":"org-max"}"#
+
+    /// token: 토큰이 실제로 속한 구독("team"/"max"), account: 함께 놓인 oauthAccount.
+    func orgSnap(token: String, refresh: String, account: String) -> CredentialsSnapshot {
+        let blob = Data(#"{"claudeAiOauth":{"accessToken":"A-\#(refresh)","refreshToken":"\#(refresh)","subscriptionType":"\#(token)"}}"#.utf8)
+        return CredentialsSnapshot(keychainBlob: blob, credentialsFileData: blob, oauthAccountJSON: Data(account.utf8))
+    }
+
+    private func storedRefresh(_ id: UUID) throws -> String? {
+        CredentialBlob.refreshToken(from: try XCTUnwrap(store.secret(for: id)).keychainBlob)
+    }
+
+    /// 두 조직 프로필을 등록하고 개인 Max를 활성으로 둔다(Mobius가 Max로 전환한 직후).
+    private func setUpTwoOrganizations() throws -> (team: AccountProfile, max: AccountProfile) {
+        let team = try store.upsertProfile(nickname: "team", snapshot: orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        let max = try store.upsertProfile(nickname: "max", snapshot: orgSnap(token: "max", refresh: "M0", account: Self.maxAccount))
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M0", account: Self.maxAccount))
+        try store.setActive(max.id)
+        return (team, max)
+    }
+
+    /// 사고 재현 ①: Max가 활성인데 Keychain에 Team 토큰이 있다(oauthAccount는 Max 그대로). 2.1.281에서는
+    /// Keychain 토큰이 invalid_grant로 빈 문자열이 된 뒤 Team 토큰을 쥔 세션의 refresh가 CAS를 통과해 채울 때
+    /// 생긴다. 5분 동기화가 이걸 Max 프로필에 저장하면 두 카드가 Team 사용량을 보이고 한 계보를 나눠 갖는다.
+    func testActiveSyncRefusesTokenFromOtherOrganization() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote, "어긋난 라이브는 신선한 스냅샷이 아니다")
+        XCTAssertEqual(try storedRefresh(max.id), "M0", "Max 프로필에 Team 토큰이 들어가면 안 된다")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+    }
+
+    /// 사고 재현 ②: 반대 방향 — Keychain은 Max 토큰인데 oauthAccount가 Team으로 되써졌다(옛 토큰을 쥔
+    /// 세션의 bootstrap). reconcile이 열쇠만 보고 Team을 활성으로 옮기며 Max 토큰을 Team에 저장하던 자리다.
+    func testReconcileIgnoresLiveWhoseTokenBelongsToAnotherOrganization() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+
+        try await switcher.reconcile()
+
+        XCTAssertEqual(store.file.activeAccountID, max.id, "열쇠가 가리키는 Team은 실제 로그인이 아니다")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(try storedRefresh(max.id), "M0")
+    }
+
+    /// 리뷰 P2-1: 신원만 되돌려진 라이브는 새 claude 세션이 다시 bootstrap할 때까지 그대로일 수 있다. reconcile이
+    /// 15초마다 같은 라이브를 다시 읽어 거부하면 그때마다 Keychain을 두 번 읽는다(`security` subprocess).
+    func testReconcileDoesNotRereadKeychainForSameRejectedLive() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        let service = env.claudeKeychainService
+        let before = kc.readsByService[service, default: 0]
+
+        try await switcher.reconcile()
+        let afterFirst = kc.readsByService[service, default: 0]
+        XCTAssertGreaterThan(afterFirst, before, "처음에는 읽어서 판정한다")
+
+        try await switcher.reconcile()
+        try await switcher.reconcile()
+
+        XCTAssertEqual(kc.readsByService[service, default: 0], afterFirst, "거부한 라이브가 그대로면 다시 읽지 않는다")
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+    }
+
+    /// 거부한 뒤라도 다시 로그인하면(로그인은 oauthAccount를 다시 쓴다) 곧바로 따라간다. "라이브 이메일이 활성과
+    /// 같으면 조기 반환"으로 막았다면, 같은 이메일의 다른 조직으로 앱 밖에서 로그인한 이 경우를 놓친다.
+    /// ★ 이 테스트는 "재로그인하면 신원 지문이 바뀐다"를 가정한다(`profileFetchedAt`을 넣어 흉내 낸다). claude
+    ///   2.1.283 실측: 같은 조직으로 `claude auth login`을 다시 하면 oauthAccount는 `profileFetchedAt`만 로그인
+    ///   시각으로 바뀌고 나머지는 바이트 단위로 같다(바이너리에서도 로그인 경로가 `profileFetchedAt: Date.now()`를
+    ///   쓴다). 이 필드가 빠지는 버전이 나오면, 같은 조직 재로그인은 불일치로 기억된 동안(최대
+    ///   `deferredLiveRecheckInterval`) 늦게 따라간다 — 토큰은 새 계보라 손상되지 않는다.
+    func testReconcileFollowsReloginAfterRejectedLive() async throws {
+        let (team, _) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        try await switcher.reconcile()   // 거부 — 지문을 기억한다
+
+        let relogged = Self.teamAccount.replacingOccurrences(of: #""seatTier""#, with: #""profileFetchedAt":1,"seatTier""#)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T2", account: relogged))
+        try await switcher.reconcile()
+
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T2")
+    }
+
+    /// 조직이 어긋난 거부는 신원 지문이 그대로면 긴 간격(`deferredLiveRecheckInterval`) 동안 다시 읽지 않는다.
+    /// 그사이 claude가 같은 계보 안에서 토큰을 회전해도 판정은 바뀌지 않는다 — 다른 계보로 바뀌는 일은 CAS 규칙상
+    /// 빈 토큰일 때만 생기고, 그건 아래 로그아웃 거부의 짧은 간격이 따라간다. 간격이 지나면 다시 읽는다.
+    func testReconcileRechecksMismatchedLiveOnlyAfterLongInterval() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        switcher.loggedOutLiveRecheckInterval = 0   // 조직 불일치에는 짧은 간격이 쓰이지 않아야 한다
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+        try await switcher.reconcile()   // 거부
+        let service = env.claudeKeychainService
+        let afterFirst = kc.readsByService[service, default: 0]
+
+        // 같은 계보 안의 회전(M1 → M2) — 신원은 그대로다
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M2", account: Self.teamAccount))
+        let afterWrite = kc.readsByService[service, default: 0]
+        try await switcher.reconcile()
+        XCTAssertEqual(kc.readsByService[service, default: 0], afterWrite, "간격 안에서는 다시 읽지 않는다")
+        XCTAssertEqual(afterWrite, afterFirst, "라이브 쓰기 자체는 Keychain 읽기를 일으키지 않는다")
+
+        switcher.deferredLiveRecheckInterval = 0
+        try await switcher.reconcile()
+        XCTAssertGreaterThan(kc.readsByService[service, default: 0], afterWrite, "간격이 지나면 다시 읽는다")
+        XCTAssertEqual(store.file.activeAccountID, max.id, "다시 읽어도 여전히 거부한다")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+    }
+
+    /// 리뷰 3회차 P2-2: 빈 토큰(로그인 없음) 거부는 짧게만 기억한다. 2.1.281에서 빈 자리는 다른 세션의 refresh가
+    /// CAS로 채울 수 있고, 그때 신원은 그대로라 지문이 바뀌지 않는다. 5분을 기다리면 그동안 활성 표시가 실제
+    /// 로그인과 다르고, 실제 라이브 계정이 폴백으로 취급되어 refresh 대상이 된다.
+    func testReconcileFollowsTokenFilledIntoEmptySlotAfterShortInterval() async throws {
+        let (team, _) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "", account: Self.teamAccount))
+        try await switcher.reconcile()   // 로그인 없음 — 거부
+        XCTAssertNotEqual(store.file.activeAccountID, team.id)
+
+        // Team 토큰을 쥔 세션의 refresh가 빈 자리를 채웠다(신원은 그대로)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T5", account: Self.teamAccount))
+        try await switcher.reconcile()
+        XCTAssertEqual(try storedRefresh(team.id), "T0", "짧은 간격 안에서는 아직 읽지 않는다")
+
+        switcher.loggedOutLiveRecheckInterval = 0   // 긴 간격(기본 5분)은 그대로 둔다
+        try await switcher.reconcile()
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try storedRefresh(team.id), "T5")
+    }
+
+    /// 리뷰 3회차 P1: Mobius가 Team으로 전환한 뒤, 옛 Max 토큰을 캐시한 세션의 bootstrap이 신원을 Max로 되돌리고,
+    /// 이어서 Team 토큰을 쥔 세션의 refresh가 프로필을 다시 받아 seatTier만 `"team_tier_1"`로 덮었다
+    /// (organizationUuid·organizationType은 Max 그대로 — claude 2.1.281 실측). seatTier를 먼저 보던 판정은 이걸
+    /// "Team 토큰 + Team 신원"으로 읽어, reconcile이 Team 토큰을 Max 프로필에 저장하고 Max를 활성으로 옮겼다.
+    func testRefreshOverwrittenSeatTierDoesNotMixOrganizations() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try store.setActive(team.id)
+        let seatOverwritten = Self.maxAccount.replacingOccurrences(of: #""seatTier":null"#, with: #""seatTier":"team_tier_1""#)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: seatOverwritten))
+
+        try await switcher.reconcile()
+        XCTAssertEqual(store.file.activeAccountID, team.id, "열쇠가 가리키는 Max는 실제 로그인이 아니다")
+        XCTAssertEqual(try storedRefresh(max.id), "M0", "Max 프로필에 Team 토큰이 들어가면 안 된다")
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+        XCTAssertTrue(wrote, "토큰은 활성 Team 프로필의 계보라 보정해 저장한다")
+        XCTAssertEqual(try storedRefresh(team.id), "T1")
+        XCTAssertEqual(try storedRefresh(max.id), "M0")
+    }
+
+    /// 리뷰 3회차 P2-1: adopt도 거부한 라이브를 기억한다. 등록하지 않은 조직의 신원에 다른 종류의 토큰이 놓인
+    /// 상태(예: 죽은 로그인의 카드를 지운 뒤)가 이어지는 동안 15초마다 Keychain을 두 번 읽지 않는다.
+    func testAdoptDoesNotRereadKeychainForSameRejectedLive() async throws {
+        _ = try setUpTwoOrganizations()
+        let unregistered = Self.teamAccount.replacingOccurrences(of: "org-team", with: "org-other")
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: unregistered))
+        let service = env.claudeKeychainService
+        let before = kc.readsByService[service, default: 0]
+
+        let first = try await switcher.adoptLiveAccountIfUnregistered()
+        XCTAssertNil(first, "섞인 라이브는 새 프로필로 흡수하지 않는다")
+        let afterFirst = kc.readsByService[service, default: 0]
+        XCTAssertGreaterThan(afterFirst, before)
+        let accountCount = store.file.accounts.count
+
+        _ = try await switcher.adoptLiveAccountIfUnregistered()
+        _ = try await switcher.adoptLiveAccountIfUnregistered()
+        XCTAssertEqual(kc.readsByService[service, default: 0], afterFirst, "거부한 라이브가 그대로면 다시 읽지 않는다")
+        XCTAssertEqual(store.file.accounts.count, accountCount, "새 프로필이 생기지 않는다")
+    }
+
+    /// 보정(리뷰 P2-3): 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 Team으로 되돌렸다. Keychain의
+    /// Max 토큰은 Mobius가 설치한 활성 프로필의 계보이므로, 동기화를 멈추지 않고 Max 프로필에 저장한다.
+    /// 신원은 Max 저장본의 것을 쓴다 — 라이브의 oauthAccount는 되돌려진 옛 조직이다.
+    func testActiveSyncReattributesTokenWhenOnlyAccountInfoWasReverted() async throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertTrue(wrote)
+        XCTAssertEqual(try storedRefresh(max.id), "M1", "회전된 Max 계보를 잃지 않는다")
+        let maxSnap = try XCTUnwrap(store.secret(for: max.id))
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: maxSnap)?.organizationUuid, "org-max")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(store.file.activeAccountID, max.id)
+    }
+
+    /// 같은 보정이 전환 직전 되저장에도 적용된다 — 떠나는 활성 프로필의 최신 계보를 챙긴 뒤 전환한다.
+    func testSwitchResavesReattributedTokenIntoLeavingActive() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M1", account: Self.teamAccount))
+
+        try switcher.switchTo(team.id)
+
+        XCTAssertEqual(try storedRefresh(max.id), "M1")
+        XCTAssertEqual(ClaudeConfigIO.identity(fromSnapshot: try XCTUnwrap(store.secret(for: max.id)))?.organizationUuid,
+                       "org-max")
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-team"))
+    }
+
+    /// 주인이 하나로 정해지지 않으면 보정하지 않는다 — 같은 이메일에 좌석형 조직이 둘이면 Team 토큰이
+    /// 어느 쪽 것인지 종류만으로는 모른다.
+    func testReattributionRefusesWhenTwoSeatProfilesCouldOwnTheToken() async throws {
+        let teamB = #"{"emailAddress":"t@x.com","organizationName":"other-team","organizationType":"claude_team","seatTier":"team_tier_1","organizationUuid":"org-team-b"}"#
+        let (team, _) = try setUpTwoOrganizations()
+        let other = try store.upsertProfile(nickname: "team-b", snapshot: orgSnap(token: "team", refresh: "B0", account: teamB))
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+        // oauthAccount만 개인 Max로 되돌려진 상태 — 토큰은 Team 계열인데 Team 프로필이 둘이다
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(try storedRefresh(team.id), "T0")
+        XCTAssertEqual(try storedRefresh(other.id), "B0")
+    }
+
+    /// 리뷰 2회차 P2-3: 다른 좌석형 프로필의 저장본이 빈 토큰이어도 주인 후보로 센다 — 건강한 저장본만
+    /// 세면 Team B의 새 토큰이 활성 Team A에 붙어 Team A의 계보가 덮인다.
+    func testReattributionCountsOwnersWhoseStoredSnapshotIsUnhealthy() async throws {
+        let teamB = #"{"emailAddress":"t@x.com","organizationName":"other-team","organizationType":"claude_team","seatTier":"team_tier_1","organizationUuid":"org-team-b"}"#
+        let (team, _) = try setUpTwoOrganizations()
+        let other = try store.upsertProfile(nickname: "team-b", snapshot: orgSnap(token: "team", refresh: "", account: teamB))
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+        // Team B에 새로 로그인한 뒤 oauthAccount만 개인 Max로 되돌려진 상태
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "B1", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(try storedRefresh(team.id), "T0", "Team A의 계보를 덮으면 안 된다")
+        XCTAssertNil(try storedRefresh(other.id))
+    }
+
+    /// 리뷰 2회차 P3-2: 섞인 저장본은 라이브에 설치하지 않는다 — 사용자가 고른 카드와 다른 조직으로 로그인된다.
+    func testSwitchRefusesMixedTargetSnapshot() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try store.setSecret(orgSnap(token: "team", refresh: "X0", account: Self.maxAccount), for: max.id)
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try store.setActive(team.id)
+
+        XCTAssertThrowsError(try switcher.switchTo(max.id)) { error in
+            XCTAssertEqual(error as? SwitcherError, .mixedSnapshot)
+        }
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-team"))
+    }
+
+    /// 전환 직전 되저장도 같은 판정을 탄다 — 떠나는 프로필에 남의 조직 토큰을 박지 않고, 전환 자체는 진행한다.
+    func testSwitchSkipsResaveOfMismatchedLiveButStillSwitches() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount))
+
+        try switcher.switchTo(team.id)
+
+        XCTAssertEqual(store.file.activeAccountID, team.id)
+        XCTAssertEqual(try io.liveAccountKey(), AccountKey(emailAddress: "t@x.com", organizationUuid: "org-team"))
+        XCTAssertEqual(try storedRefresh(max.id), "M0", "되저장을 건너뛰어 Max 프로필이 오염되지 않는다")
+    }
+
+    /// adopt도 어긋난 라이브로는 새 프로필을 만들지 않는다.
+    func testAdoptSkipsMismatchedLive() async throws {
+        _ = try store.upsertProfile(nickname: "team", snapshot: orgSnap(token: "team", refresh: "T0", account: Self.teamAccount))
+        try io.writeLiveSnapshot(orgSnap(token: "team", refresh: "T1", account: Self.maxAccount)) // Max는 미등록
+        let adopted = try await switcher.adoptLiveAccountIfUnregistered()
+        XCTAssertNil(adopted)
+        XCTAssertFalse(store.file.accounts.contains { $0.organizationUuid == "org-max" })
+    }
+
+    /// claude는 invalid_grant를 받은 토큰을 빈 문자열로 지운다(실측 `.bak`). 로그인 없는 상태를 프로필 저장본으로
+    /// 굳히지 않는다 — 저장본을 남겨 두면 폴백 검증이 그 토큰의 생사를 스스로 판정한다.
+    func testActiveSyncDoesNotSaveLoggedOutBlob() async throws {
+        let (_, max) = try setUpTwoOrganizations()
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertFalse(wrote)
+        XCTAssertEqual(try storedRefresh(max.id), "M0")
+    }
+
+    /// 이미 빈 토큰이 저장된 프로필(수정 전 버전이 남긴 상태)에 CLI에서 다시 로그인하면 딱지가 풀린다.
+    func testReauthClearsWhenReloginReplacesStoredBlankToken() async throws {
+        let (_, max) = try setUpTwoOrganizations()
+        try store.setSecret(orgSnap(token: "max", refresh: "", account: Self.maxAccount), for: max.id)
+        try store.setNeedsReauth(max.id, true)
+        try io.writeLiveSnapshot(orgSnap(token: "max", refresh: "M9", account: Self.maxAccount))
+
+        let wrote = await switcher.refreshActiveSnapshotIfStable()
+
+        XCTAssertTrue(wrote)
+        XCTAssertFalse(reauthFlag(max.id), "빈 토큰 다음의 비지 않은 토큰은 새 로그인에서만 나온다")
+    }
+
+    /// 표시 규칙이 바뀌면 기존 프로필의 등급 문자열도 저장 스냅샷에서 다시 계산한다.
+    func testRefreshTierLabelsReplacesStaleCodename() throws {
+        let (team, max) = try setUpTwoOrganizations()
+        try store.update(team.id) { $0.tierDescription = "Raven" }   // 수정 전 규칙이 만든 문자열
+        try store.update(max.id) { $0.tierDescription = "Max 20X" }
+
+        XCTAssertEqual(Set(try switcher.refreshTierLabels()), [team.id, max.id])
+        XCTAssertEqual(store.file.accounts.first { $0.id == team.id }?.tierDescription, "Team")
+        XCTAssertEqual(store.file.accounts.first { $0.id == max.id }?.tierDescription, "Max 20x")
+        XCTAssertEqual(try switcher.refreshTierLabels(), [], "이미 맞으면 건드리지 않는다")
     }
 }

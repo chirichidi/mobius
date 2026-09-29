@@ -266,6 +266,8 @@ final class AppState: ObservableObject {
         // 조직으로 로그인했을 때 이 프로필이 이메일만으로 잡혀 덮어써지지 않게(실패 기록 23).
         // 비밀 파일이 있는 계정만 읽으므로 Keychain 승인창은 뜨지 않는다.
         _ = try? switcher.backfillOrganizationUUIDs()
+        // 등급 표시 규칙이 바뀌어도 기존 프로필은 등록 때의 문자열을 들고 있다 — 스냅샷에서 다시 계산.
+        _ = try? switcher.refreshTierLabels()
         self.file = store.file
         self.lastError = initError
         // init에서의 직접 대입은 didSet이 불리지 않는다 — TTL 기준점을 수동 기록
@@ -376,7 +378,11 @@ final class AppState: ObservableObject {
                         notify(title: loc("재로그인 필요"),
                                body: loc("%@ 계정의 인증이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요.", profile.nickname))
                         continue
-                    case .locallyDead, .noRefreshToken:
+                    case .organizationMismatch:
+                        reauthChanged = true
+                        notifyMixedCredentials(profile.nickname, .organizationMismatch)
+                        continue
+                    case .locallyDead, .noRefreshToken, .mixedSnapshot, .sharedLineage:
                         // **로컬로 판정 가능**한 죽음 — 매 팝오버 함께 도는 validateFallbacksLocally가
                         // 알림을 전담하므로(같은 계정에 알림 2개 방지) 여기선 알리지 않는다.
                         // check가 켠 needsReauth 반영(reload)만 하고 조용히 스킵.
@@ -566,6 +572,11 @@ final class AppState: ObservableObject {
                     changed = true   // targets는 !needsReauth만 → 새 전이 → 1회 알림
                     notify(title: loc("재로그인 필요"),
                            body: loc("%@ 계정의 로그인이 만료됐어요. 카드의 '다시 로그인'을 눌러주세요.", p.nickname))
+                } else if r == .mixedSnapshot || r == .sharedLineage {
+                    // 저장 스냅샷이 섞였거나 다른 카드와 계보를 나눠 가졌다(네트워크 0으로 판정) —
+                    // 여기서 알림을 전담한다.
+                    changed = true
+                    notifyMixedCredentials(p.nickname, r)
                 }
             }
             if changed { MobiusNotification.postAccountsChanged(); reload() }
@@ -584,9 +595,24 @@ final class AppState: ObservableObject {
             notify(title: loc("재로그인 필요"),
                    body: loc("%@ 계정의 로그인이 만료돼 전환을 건너뛰었어요. '다시 로그인'을 눌러주세요.", name))
             return false
+        case .organizationMismatch, .mixedSnapshot, .sharedLineage:
+            // 전환하면 이 카드와 다른 조직으로 로그인되거나, 다른 카드와 나눠 가진 계보를 쓰게 된다 —
+            // 죽은 계정과 같이 전환을 취소한다(checker가 마킹했으므로 다음 틱엔 다른 폴백을 고른다).
+            notifyMixedCredentials(store.file.accounts.first { $0.id == id }?.nickname ?? "?", r)
+            return false
         default:
             return true   // refreshedAlive / transient / notFallback → 전환 진행
         }
+    }
+
+    /// 저장 스냅샷에 다른 조직의 토큰이 들어 있었거나(`.organizationMismatch`·`.mixedSnapshot`),
+    /// 다른 카드와 같은 refresh 토큰을 나눠 가졌을 때(`.sharedLineage`) — 실패 기록 24.
+    /// "만료"와 문구를 나눈다 — 사용자가 할 일은 같지만(다시 로그인), 로그인할 **조직**을 골라야 한다.
+    private func notifyMixedCredentials(_ name: String, _ result: FallbackCheckResult) {
+        let body = result == .sharedLineage
+            ? loc("%@ 계정이 다른 카드와 같은 로그인을 나눠 쓰고 있었어요. 카드의 '다시 로그인'으로 이 조직에 다시 로그인해 주세요.", name)
+            : loc("%@ 계정에 다른 조직의 로그인이 저장돼 있었어요. 카드의 '다시 로그인'으로 이 조직에 다시 로그인해 주세요.", name)
+        notify(title: loc("재로그인 필요"), body: body)
     }
 
     /// 만료 임박한 폴백의 refresh 토큰을 미리 갱신한다 — refresh가 새 refresh 토큰(연장된
@@ -611,6 +637,9 @@ final class AppState: ObservableObject {
             switch r {
             case .refreshedAlive:
                 changed = true
+            case .organizationMismatch, .mixedSnapshot, .sharedLineage:
+                changed = true
+                notifyMixedCredentials(p.nickname, r)
             case .dead, .locallyDead, .noRefreshToken, .storeFailed:
                 changed = true
                 notify(title: loc("재로그인 필요"),
@@ -1503,6 +1532,9 @@ final class AppState: ObservableObject {
             }
             let fromID = store.file.activeByProvider[provider]
             if provider == .codex { await quiesceCodexUsageTask() }
+            // primary 자동 복귀(.primaryRecovered)는 위 preflight를 거치지 않는다. 팝오버 게이지가 그
+            // 계정을 refresh하는 중이면 회전 직전 스냅샷이 라이브에 설치된다 — 끝날 때까지 기다린다(리뷰 P2).
+            if provider == .claude { await fallbackChecker.waitForInFlightRefresh(of: id) }
             do {
                 try switcher.switchTo(id)
                 engines[provider]?.noteSwitched(now: now,
@@ -1576,7 +1608,12 @@ final class AppState: ObservableObject {
                     performSwitch(to: id)
                 }
             } else {
-                performSwitch(to: id)   // 이미 재인증 필요로 마킹된 claude — preflight 없이 전환
+                // 이미 재인증 필요로 마킹된 claude — preflight 없이 전환하되, 진행 중인 refresh가 있으면
+                // 끝난 뒤에 설치한다(회전 직전 스냅샷을 라이브에 넣으면 그 토큰은 곧 소비돼 죽는다).
+                Task { @MainActor in
+                    await fallbackChecker.waitForInFlightRefresh(of: id)
+                    performSwitch(to: id)
+                }
             }
             return
         }
@@ -1602,6 +1639,9 @@ final class AppState: ObservableObject {
             try? store.setAutoSwitchedFromPrimary(false, provider: provider)
             MobiusNotification.postAccountsChanged()
             reload()
+        } catch SwitcherError.mixedSnapshot {
+            lastError = loc("이 카드에는 다른 조직의 로그인이 저장돼 있어 전환하지 않았어요. 카드의 '다시 로그인'을 눌러 주세요.")
+            return
         } catch {
             lastError = loc("전환 실패: %@", error.localizedDescription)
             return

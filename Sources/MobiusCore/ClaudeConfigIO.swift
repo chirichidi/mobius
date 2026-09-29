@@ -2,6 +2,16 @@ import Foundation
 
 public enum ClaudeConfigError: Error { case malformedClaudeJSON }
 
+/// 라이브 스냅샷(토큰 + oauthAccount)을 프로필에 저장해도 되는지의 판정.
+public enum LiveSnapshotVerdict: Equatable, Sendable {
+    case storable
+    /// 쓸 수 있는 refresh 토큰이 없다 — invalid_grant 뒤 비워진 토큰, 재로그인 준비 단계가 남긴
+    /// `mcpOAuth`만의 blob, 빈 객체 `{}`
+    case loggedOut
+    /// 토큰과 oauthAccount가 서로 다른 조직(좌석형 ↔ 개인 구독)을 가리킨다
+    case organizationMismatch
+}
+
 /// Claude Code 자격증명 3곳(Keychain / .credentials.json / ~/.claude.json oauthAccount)의 읽기·쓰기.
 public struct ClaudeConfigIO: Sendable {
     let env: MobiusEnvironment
@@ -121,6 +131,15 @@ extension ClaudeConfigIO: ProviderConfigIO {
         return Self.identity(fromOAuthBlock: block)?.key
     }
 
+    /// oauthAccount 블록 전체(키 정렬 JSON) — 파일 한 번 읽기(승인창 없음). 열쇠만 보지 않는 이유: 로그인은
+    /// 이 블록을 지우고 다시 쓰므로(2.1.281 실측, 핵심 사실 "토큰과 신원은 쓰는 경로가 다르다"), 같은 조직으로
+    /// 다시 로그인해 열쇠가 그대로여도 지문은 바뀐다. `profileFetchedAt` 같은 필드도 가끔 바뀌는데, 그때는
+    /// 한 번 더 읽을 뿐이다.
+    public func liveIdentityFingerprint() throws -> Data? {
+        guard let block = try readOAuthAccountDict() else { return nil }
+        return try JSONSerialization.data(withJSONObject: block, options: [.sortedKeys])
+    }
+
     /// oauthAccount 블록 → 표시용 신원. 라이브 읽기와 스냅샷 기반 등록(AccountStore)이 공유.
     /// organizationUuid가 없는 옛 claude.json이면 ""(조직 미상)으로 둔다 — 이메일만으로 대조된다.
     public static func identity(fromOAuthBlock block: [String: Any]) -> ProviderIdentity? {
@@ -141,16 +160,88 @@ extension ClaudeConfigIO: ProviderConfigIO {
     }
 
     /// "default_claude_max_20x" → "Max 20x" 정도의 사람이 읽는 문자열로.
-    /// Team 워크스페이스의 oauthAccount는 organizationType·organizationRateLimitTier가 **둘 다 null**이고
-    /// `seatTier: "team_tier_1"`만 온다(실측 2026-09-11) — 그래서 seatTier까지 폴백한다("Team Tier 1").
+    /// ★ 좌석형 조직(Team·Enterprise)은 organizationRateLimitTier를 **보지 않는다**. 2026-09-24 실측에서
+    ///   Team의 organizationRateLimitTier는 `"default_raven"`으로 채워져 와서, 등급 칸에 내부 코드명
+    ///   "Raven"이 떴다. 조직 한도 등급은 개인 구독(Max 5x·20x)에서만 사람이 읽을 이름이다.
+    /// ★ 좌석형인지는 `isSeatOrganization` **한 곳**에서 정한다 — 저장 판정과 같은 규칙이어야 한다.
+    ///   로그인 직후에는 organizationType이 비어 있고 seatTier만 있어서(아래 판정의 주석), organizationType만
+    ///   보면 LoginFlow가 막 등록한 Team 카드가 "Raven"이나 "Team Tier 1"로 뜬다(리뷰 지적). 이때는 seatTier의
+    ///   앞 낱말(`"team_tier_1"` → "Team")을 쓴다 — 다른 Team 카드와 같은 표기가 된다. 판정이 organizationType을
+    ///   먼저 보므로, refresh가 seatTier만 덮어쓴 개인 구독 신원은 개인 구독 등급으로 남는다.
     static func tierDescription(from block: [String: Any]) -> String {
+        if isSeatOrganization(oauthBlock: block) == true {
+            switch block["organizationType"] as? String {
+            case "claude_team": return "Team"
+            case "claude_enterprise": return "Enterprise"
+            default:
+                let word = ((block["seatTier"] as? String) ?? "").split(separator: "_").first.map(String.init) ?? ""
+                return word.prefix(1).uppercased() + word.dropFirst()
+            }
+        }
         let tier = (block["organizationRateLimitTier"] as? String)
-            ?? (block["organizationType"] as? String)
-            ?? (block["seatTier"] as? String) ?? ""
+            ?? (block["organizationType"] as? String) ?? ""
         return tier.replacingOccurrences(of: "default_", with: "")
             .replacingOccurrences(of: "claude_", with: "")
             .replacingOccurrences(of: "_", with: " ")
-            .capitalized
+            .split(separator: " ")
+            // `capitalized`는 "20x"를 "20X"로 만든다 — 글자로 시작하는 낱말만 첫 글자를 올린다.
+            .map { $0.first?.isLetter == true ? $0.prefix(1).uppercased() + $0.dropFirst() : String($0) }
+            .joined(separator: " ")
+    }
+
+    /// oauthAccount 블록이 좌석형 조직(Team·Enterprise)을 가리키는가. 개인 구독이면 false, 모르면 nil.
+    /// ★ `organizationType`을 먼저 보고, 없을 때만 `seatTier`를 본다. 판정 근거는 "organizationUuid와 **같은
+    ///   쓰기**로 바뀌는 필드인가"다(claude 2.1.281 바이너리 실측).
+    ///   - organizationType은 bootstrap이 organizationUuid·organizationName·seatTier와 함께 쓴다. 로그인은 ①에서
+    ///     oauthAccount를 지우므로 로그인 직후(④ bootstrap 전)에는 아예 없다. 즉 있으면 organizationUuid와 짝이 맞다.
+    ///   - seatTier는 로그인(②)과 bootstrap이 organizationUuid와 함께 쓰지만, **refresh도** 프로필을 다시 받으면
+    ///     그 토큰의 프로필에서 seatTier만 덮어쓴다(organizationUuid·organizationType은 병합 대상이 아니다).
+    ///     그래서 신원이 개인 Max로 되돌려진 라이브에서 Team 토큰이 refresh되면 seatTier만 `"team_tier_1"`이
+    ///     되고, seatTier를 먼저 보면 Team 토큰과 Max 신원이 짝이 맞는 것으로 판정돼 사고와 같은 방향의
+    ///     섞인 저장이 다시 열린다(리뷰 3회차 P1).
+    ///   organizationType이 없는 구간(로그인 직후, 또는 그 구간에 등록한 저장본을 설치한 뒤 다음 bootstrap
+    ///   전)에는 seatTier를 쓴다. 대개 로그인이 organizationUuid와 함께 쓴 값이지만, refresh의 병합은 CAS
+    ///   결과와 상관없이 일어나므로 그 사이 전환이 겹치면 다른 토큰의 값일 수 있다. 그때는 대개 거짓 거부로
+    ///   끝나고 bootstrap이 organizationType을 채우면 풀린다(리뷰 4회차 P3-1).
+    /// ★ 전제: 개인 구독의 seatTier는 null이다(2026-09-24 실측 한 번: 개인 Max null, Team `"team_tier_1"`).
+    ///   이제 이 전제는 organizationType이 없는 짧은 구간에만 쓰인다.
+    static func isSeatOrganization(oauthBlock block: [String: Any]) -> Bool? {
+        switch block["organizationType"] as? String {
+        case "claude_team", "claude_enterprise": return true
+        case "claude_max", "claude_pro": return false
+        default: break
+        }
+        if let seat = block["seatTier"] as? String, !seat.isEmpty { return true }
+        return nil
+    }
+
+    /// 라이브 스냅샷을 프로필에 저장해도 되는가 — 토큰(Keychain)과 신원(~/.claude.json)이
+    /// **같은 로그인**의 것인가를 네트워크 없이 판정한다(실패 기록 24).
+    ///
+    /// 두 곳은 쓰는 주체와 시점이 다르다. claude는 refresh 때 토큰만 쓰고 oauthAccount의
+    /// organizationUuid는 건드리지 않으며, 세션 시작 때의 bootstrap은 **그 프로세스가 쥔 토큰**의
+    /// 조직으로 oauthAccount를 다시 쓴다(2.1.281 실측). 전환 직후 옛 토큰을 캐시한 세션(캐시 30초)이
+    /// bootstrap하면 oauthAccount만 옛 조직으로 돌아가고, Keychain 토큰이 빈 문자열로 지워진 뒤에는
+    /// 다른 세션의 refresh 결과가 그 자리를 채울 수 있다. 이렇게 두 곳이 서로 다른 조직을 가리킬 때
+    /// 짝지어 저장하면 조직 A의 토큰이 조직 B 프로필에 들어가고, 그 뒤로는 두 프로필이 한 토큰 계보를
+    /// 나눠 가져 한쪽이 회전할 때마다 다른 쪽이 invalid_grant가 된다.
+    ///
+    /// 판정 근거는 blob의 `subscriptionType`이다. claude는 이 값을 로그인 때 조직 종류에서 만들고,
+    /// 조직 종류를 모르면 null로 둔다. null인 계보에서는 판정할 수 없어 `.storable`이 된다
+    /// (2026-09-24 실측 환경에서는 Team `"team"`, 개인 Max `"max"`로 채워져 있었다).
+    ///
+    /// 판정은 좌석형(Team·Enterprise)인지 개인 구독(Max·Pro)인지만 본다. 같은 이메일의 개인 조직은
+    /// 하나뿐이라 회사 조직과 개인 구독이 섞이는 경우를 정확히 잡는다. 같은 종류의 두 조직(Team과
+    /// 다른 Team)은 이 신호로 가를 수 없다 — 그건 폴백 refresh 응답의 조직 UUID가 잡는다
+    /// (`FallbackAuthChecker`). Pro→Max처럼 개인 구독 안에서 요금제가 바뀌어도 오판하지 않는다.
+    public static func liveSnapshotVerdict(_ snap: CredentialsSnapshot) -> LiveSnapshotVerdict {
+        if CredentialBlob.lacksLogin(snap.keychainBlob) { return .loggedOut }
+        guard let tokenSeat = CredentialBlob.isSeatSubscription(from: snap.keychainBlob),
+              let json = snap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              let accountSeat = isSeatOrganization(oauthBlock: block)
+        else { return .storable }   // 한쪽이라도 모르면 막지 않는다(구버전 claude·테스트 blob)
+        return tokenSeat == accountSeat ? .storable : .organizationMismatch
     }
 
     public func readStableLiveSecretData(gap: Duration) async -> (data: Data, email: String)? {
@@ -161,6 +252,58 @@ extension ClaudeConfigIO: ProviderConfigIO {
 
     public func writeLiveSecretData(_ data: Data) throws {
         try writeLiveSnapshot(try JSONDecoder().decode(CredentialsSnapshot.self, from: data))
+    }
+
+    public func canStoreLiveSecret(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .storable
+    }
+
+    public func liveSecretLacksLogin(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .loggedOut
+    }
+
+    /// 어긋난 라이브(`.organizationMismatch`)의 토큰 종류(좌석형/개인 구독)가 `stored`의 oauthAccount
+    /// 조직 종류와 같으면, 라이브 토큰에 `stored`의 oauthAccount를 붙인 스냅샷을 돌려준다.
+    /// 옛 토큰을 캐시한 세션의 bootstrap이 oauthAccount만 옛 조직으로 되돌린 경우, Keychain 토큰은
+    /// Mobius가 설치한 활성 프로필의 것이 맞다(2.1.281 refresh 저장은 CAS라 다른 세션이 덮지 못한다).
+    /// 그 토큰을 버리면 판정을 미루는 동안 회전된 계보를 잃는다(리뷰 P2-3). **어느 프로필에 붙일지는
+    /// 호출자(Switcher)가 정한다** — 이 함수는 종류가 맞는지만 본다. `stored` 자체가 섞여 있으면 nil.
+    public func liveSecret(_ live: Data, reattributedTo stored: Data) -> Data? {
+        let decoder = JSONDecoder()
+        guard let liveSnap = try? decoder.decode(CredentialsSnapshot.self, from: live),
+              let storedSnap = try? decoder.decode(CredentialsSnapshot.self, from: stored),
+              Self.liveSnapshotVerdict(liveSnap) == .organizationMismatch,
+              Self.liveSnapshotVerdict(storedSnap) == .storable,
+              let tokenSeat = CredentialBlob.isSeatSubscription(from: liveSnap.keychainBlob),
+              let json = storedSnap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              Self.isSeatOrganization(oauthBlock: block) == tokenSeat
+        else { return nil }
+        return try? JSONEncoder().encode(CredentialsSnapshot(keychainBlob: liveSnap.keychainBlob,
+                                                             credentialsFileData: liveSnap.credentialsFileData,
+                                                             oauthAccountJSON: storedSnap.oauthAccountJSON))
+    }
+
+    /// 저장본의 oauthAccount가 가리키는 조직 종류가 라이브 토큰 종류와 같거나 **모르면** true.
+    /// 저장본의 토큰 상태(빈 토큰, 섞임)는 보지 않는다 — 신원은 그 프로필이 어느 조직인지를 말할 뿐이다.
+    public func liveToken(_ live: Data, couldBelongTo stored: Data?) -> Bool {
+        let decoder = JSONDecoder()
+        guard let liveSnap = try? decoder.decode(CredentialsSnapshot.self, from: live),
+              let tokenSeat = CredentialBlob.isSeatSubscription(from: liveSnap.keychainBlob),
+              let stored,
+              let storedSnap = try? decoder.decode(CredentialsSnapshot.self, from: stored),
+              let json = storedSnap.oauthAccountJSON,
+              let block = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+              let accountSeat = Self.isSeatOrganization(oauthBlock: block)
+        else { return true }
+        return accountSeat == tokenSeat
+    }
+
+    public func secretIsMixed(_ data: Data) -> Bool {
+        guard let snap = try? JSONDecoder().decode(CredentialsSnapshot.self, from: data) else { return false }
+        return Self.liveSnapshotVerdict(snap) == .organizationMismatch
     }
 
     /// Claude secret은 CredentialsSnapshot JSON이다 — 디코드되면 Claude 형태.

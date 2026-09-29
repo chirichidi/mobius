@@ -38,6 +38,7 @@ func makeContext(healProviders: Bool = false) throws -> (
         // 조직 로그인이 이 프로필을 덮어쓰지 않게(실패 기록 23). 비밀 파일이 있는 계정만 읽으므로
         // 승인창은 뜨지 않는다.
         _ = try? switcher.backfillOrganizationUUIDs()
+        _ = try? switcher.refreshTierLabels()
     }
     return (env, store, io, codexIO, switcher)
 }
@@ -117,7 +118,13 @@ struct Switch: ParsableCommand {
                 + "`claude`에서 그 계정으로 직접 로그인한 뒤 "
                 + "`mobius capture <다른 닉네임>`으로 이름을 바꾸세요.")
         }
-        try ctx.switcher.switchTo(target.id)
+        do {
+            try ctx.switcher.switchTo(target.id)
+        } catch SwitcherError.mixedSnapshot {
+            // 실패 기록 24 — 설치하면 이 카드와 다른 조직으로 로그인된다
+            throw ValidationError("'\(target.nickname)'에 다른 조직의 로그인이 저장돼 있어 전환하지 않았습니다. "
+                + "`claude`에서 /login 으로 이 조직에 로그인한 뒤 `mobius capture \(target.nickname)` 하세요.")
+        }
         // 사용자의 의지로 전환 — 앱 onTick의 primary 자동 복귀 대상이 아니다
         try ctx.store.setAutoSwitchedFromPrimary(false, provider: target.provider)
         MobiusNotification.postAccountsChanged()
@@ -180,6 +187,14 @@ struct Capture: ParsableCommand {
             }
             guard let identity = ClaudeConfigIO.identity(fromSnapshot: snap) else {
                 throw ValidationError("~/.claude.json 에 계정 정보(oauthAccount)가 없습니다. `claude`에서 다시 로그인하세요.")
+            }
+            // 토큰과 계정 정보가 같은 로그인의 것일 때만 등록한다(실패 기록 24).
+            switch ClaudeConfigIO.liveSnapshotVerdict(snap) {
+            case .storable: break
+            case .loggedOut:
+                throw ValidationError("로그인이 진행 중이거나 로그아웃된 상태입니다. 로그인이 끝난 뒤 다시 실행하세요.")
+            case .organizationMismatch:
+                throw ValidationError("Keychain의 토큰과 ~/.claude.json 의 계정 정보가 서로 다른 조직(회사/개인)을 가리킵니다. `claude`에서 /login 으로 캡처할 조직에 다시 로그인한 뒤 실행하세요.")
             }
             try Self.rejectNicknameTakenByAnotherAccount(name, provider: .claude,
                                                         identity: identity, store: ctx.store)

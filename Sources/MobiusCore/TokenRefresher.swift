@@ -17,11 +17,21 @@ public struct RefreshedTokens: Equatable, Sendable {
     public let expiresAtMs: Int               // epoch ms
     public let refreshTokenExpiresAtMs: Int?   // epoch ms (응답이 주면)
     public let scopes: [String]?
+    /// 이 토큰이 실제로 속한 조직(응답의 `organization.uuid`). 응답에 없으면 nil.
+    /// claude 2.1.281도 같은 필드를 `tokenAccount.organizationUuid`로 읽는다(바이너리 실측).
+    /// 저장 스냅샷이 **남의 조직 토큰**을 들고 있었는지 추가 호출 없이 가려내는 근거다(실패 기록 24).
+    public let organizationUuid: String?
+    /// 이 토큰의 계정 이메일(응답의 `account.email_address`). 없으면 nil. 한 회사 조직에는 여러 이메일이
+    /// 속하므로 조직 UUID만으로는 계정을 가르지 못한다 — 같이 대조한다(리뷰 2회차 P2-4).
+    public let accountEmail: String?
     public init(accessToken: String, refreshToken: String, expiresAtMs: Int,
-                refreshTokenExpiresAtMs: Int?, scopes: [String]?) {
+                refreshTokenExpiresAtMs: Int?, scopes: [String]?, organizationUuid: String? = nil,
+                accountEmail: String? = nil) {
         self.accessToken = accessToken; self.refreshToken = refreshToken
         self.expiresAtMs = expiresAtMs; self.refreshTokenExpiresAtMs = refreshTokenExpiresAtMs
         self.scopes = scopes
+        self.organizationUuid = organizationUuid
+        self.accountEmail = accountEmail
     }
 }
 
@@ -91,8 +101,13 @@ public struct OAuthTokenRefresher: TokenRefresher {
             let rteMs = intValue(obj["refresh_token_expires_in"]).map { nowMs + $0 * 1000 }
             let scopes = (obj["scope"] as? String)?
                 .split(separator: " ").map(String.init)
+            let org = ((obj["organization"] as? [String: Any])?["uuid"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let email = ((obj["account"] as? [String: Any])?["email_address"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
             return RefreshedTokens(accessToken: at, refreshToken: rt, expiresAtMs: expiresAtMs,
-                                   refreshTokenExpiresAtMs: rteMs, scopes: scopes)
+                                   refreshTokenExpiresAtMs: rteMs, scopes: scopes,
+                                   organizationUuid: org, accountEmail: email)
         }
         // invalid_grant = refresh 토큰 폐기 → 확정 죽음. 그 외 오류는 오탐 방지 위해 transient.
         if (400...499).contains(status) {
@@ -145,6 +160,50 @@ public enum CredentialBlob {
         guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any] else { return nil }
         return msDate(tokenDict(obj)?["refreshTokenExpiresAt"])
     }
+    /// refresh 토큰 **키는 있는데 값이 빈 문자열**인가. claude는 refresh가 invalid_grant를 받으면
+    /// 그 죽은 토큰을 `refreshToken:""`·`accessToken:""`·`expiresAt:0`으로 지우고 나머지(scopes·
+    /// subscriptionType·refreshTokenExpiresAt)는 남긴다(2.1.281 실측, 저장 스냅샷 `.bak`에도 남아
+    /// 있었다). 죽은 로그인이 치워진 상태이지 손상이 아니다(`ReauthClearance`). 키가 없으면 false(모름).
+    public static func hasEmptyRefreshToken(from blob: Data) -> Bool {
+        guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+              let rt = tokenDict(obj)?["refreshToken"] as? String else { return false }
+        return rt.isEmpty
+    }
+
+    /// claude 자격증명 blob 모양인데 **쓸 수 있는 로그인이 없는가**. 셋 중 하나다:
+    ///   - `claudeAiOauth`(또는 평면 토큰 필드)는 있는데 refresh 토큰이 없거나 빈 문자열 — claude는
+    ///     refresh가 invalid_grant를 받으면 그 죽은 토큰을 빈 문자열로 지운다(2.1.281 실측)
+    ///   - `claudeAiOauth`가 통째로 없고 다른 항목(`mcpOAuth` 등)만 남음 — 재로그인 준비 단계는
+    ///     이 항목만 지우고 나머지를 남긴다(2.1.281 실측)
+    ///   - 빈 객체 `{}` — MCP 항목이 없는 사용자에게 재로그인 준비 단계가 남기는 모양(리뷰 P2)
+    /// 이런 blob을 프로필에 저장하면 그 프로필의 저장본이 로그인 없는 상태로 덮인다(실패 기록 24).
+    /// 모양을 알 수 없는 blob(claude 필드가 하나도 없는 비지 않은 객체)은 false — 모르면 막지 않는다.
+    public static func lacksLogin(_ blob: Data) -> Bool {
+        guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any] else { return false }
+        if obj.isEmpty { return true }
+        let looksLikeClaude = obj["claudeAiOauth"] != nil || obj["mcpOAuth"] != nil
+            || obj["refreshToken"] != nil || obj["accessToken"] != nil
+        return looksLikeClaude && refreshToken(from: blob) == nil
+    }
+
+    /// 토큰 발급 당시의 구독 종류(`subscriptionType`: "max"·"pro"·"team"·"enterprise").
+    /// claude는 refresh 때 이 값을 **이전 blob에서 그대로 물려준다**(프로필을 다시 받을 때만 갱신 —
+    /// 2.1.281 실측). 그래서 한 토큰 계보 안에서는 거의 바뀌지 않는 지문 구실을 한다.
+    public static func subscriptionType(from blob: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: blob) as? [String: Any],
+              let s = tokenDict(obj)?["subscriptionType"] as? String, !s.isEmpty else { return nil }
+        return s.lowercased()
+    }
+
+    /// 좌석형 조직(Team·Enterprise)의 토큰인가. 개인 구독(Max·Pro)이면 false, 모르면 nil.
+    public static func isSeatSubscription(from blob: Data) -> Bool? {
+        switch subscriptionType(from: blob) {
+        case "team", "enterprise": return true
+        case "max", "pro": return false
+        default: return nil
+        }
+    }
+
     /// 네트워크 0 로컬 선검사: refresh 토큰이 **확실히** 만료됐는가.
     /// 값이 없거나 미래면 false(죽었다고 단정하지 않음 — 오탐 방지).
     public static func isRefreshTokenExpired(blob: Data, now: Date) -> Bool {
