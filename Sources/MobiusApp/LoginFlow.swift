@@ -52,8 +52,12 @@ final class LoginFlowController: NSObject, ASWebAuthenticationPresentationContex
 
             // (a) 완료 감지를 취소 판단보다 먼저 — 로그인이 실제로 됐으면 취소로 오판하지 않는다.
             //     토큰+이메일을 두 번 읽어 일치할 때만(전환 중 불일치 배제) 등록한다.
+            //     ★ blob이 바뀌었다고 끝난 게 아니다 — claude는 재로그인 도중 Keychain에서 로그인
+            //     항목을 지우고 조직 정보를 먼저 쓴 뒤 토큰을 쓴다(2.1.281 실측). 그 중간 상태를
+            //     등록하면 토큰 없는 스냅샷이 프로필을 덮는다. 저장해도 되는 상태까지 기다린다(실패 기록 24).
             if let (snap, email) = await io.readStableLiveSnapshot(),
-               snap.keychainBlob != previous?.keychainBlob {
+               snap.keychainBlob != previous?.keychainBlob,
+               ClaudeConfigIO.liveSnapshotVerdict(snap) == .storable {
                 session?.cancel(); session = nil   // 창 닫기
 
                 // 같은 이메일이라도 조직이 다르면 다른 계정이다(AccountKey, 실패 기록 23) — 회사 Team과
