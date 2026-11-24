@@ -1396,14 +1396,16 @@ final class AppState: ObservableObject {
         guard let current = store.file.active(of: .claude), current.id == active.id else { return }
 
         let threshold = advisoryThreshold
-        let util = snap.fiveHourPercent ?? 0
+        // ★ 5시간 창만 보면 주간 창이 98%여도 미리 전환이 일어나지 않는다(실측 2026-11-24:
+        //   5시간 91%·주간 98%·임계값 95%에서 무반응). 계정 창 둘 중 높은 쪽을 본다.
+        let util = snap.accountWindowPeakPercent
 
         // 히스테리시스 set/clear. set: 임계값 이상 + 리셋 시각 존재 → detectedAt 보존해 세운다.
         // clear: 밴드 아래(임계값-5 이하) + 기존 advisory 존재 → 해제하되 백오프·last-advised
         //        맵은 **건드리지 않는다**(새 창은 resetsAt이 달라 자연히 재알림된다).
         // 그 사이(밴드 내부)면 그대로 둔다.
         if AdvisoryRecord.shouldSet(utilization: util, threshold: threshold),
-           let resetsAt = snap.fiveHourResetsAt {
+           let resetsAt = snap.advisoryResetsAt(threshold: threshold, now: now) {
             let detectedAt = current.advisory?.detectedAt ?? now  // 이미 있었으면 첫 시각 보존
             try? store.setAdvisory(active.id,
                 AdvisoryRecord(utilization: util, resetsAt: resetsAt, detectedAt: detectedAt))
@@ -1489,7 +1491,9 @@ final class AppState: ObservableObject {
             }
             guard let snap = await fetchUsage(accountID: p.id, keychainBlob: fetchBlob).snapshot else { continue }
             usage[p.id] = snap
-            if (snap.fiveHourPercent ?? 0) < threshold { return p.id }   // 임계값 미만 = 검증된 후보
+            // 임계값 미만 = 검증된 후보. 활성 판정과 같은 규칙(두 계정 창 중 높은 쪽) — 5시간만
+            // 보면 주간이 임계값을 넘은 폴백으로 옮겨 가 곧바로 다시 걸린다.
+            if snap.accountWindowPeakPercent < threshold { return p.id }
         }
         return nil
     }

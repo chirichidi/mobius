@@ -317,4 +317,65 @@ final class UsageFetcherTests: XCTestCase {
         XCTAssertTrue(UsageFetchOutcome.unauthorized.countsAsPollFailure)
         XCTAssertTrue(UsageFetchOutcome.failed.countsAsPollFailure)
     }
+
+    // MARK: - 임계값 선제 전환(advisory)이 보는 계정 창
+
+    /// 실측 2026-11-24: 5시간 91%·주간 98%·임계값 95%에서 미리 전환이 일어나지 않았다 —
+    /// 판정이 5시간 창만 봤기 때문이다. 주간 창도 판정값에 들어가야 한다.
+    func testAdvisoryPeakIncludesWeeklyWindow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let fiveReset = now.addingTimeInterval(32 * 60)
+        let weekReset = now.addingTimeInterval(39 * 3600)
+        let snap = UsageSnapshot(fiveHourPercent: 91, fiveHourResetsAt: fiveReset,
+                                 sevenDayPercent: 98, sevenDayResetsAt: weekReset, fetchedAt: now)
+        XCTAssertEqual(snap.accountWindowPeakPercent, 98)
+        XCTAssertTrue(AdvisoryRecord.shouldSet(utilization: snap.accountWindowPeakPercent, threshold: 95))
+        // 경고 기한은 임계값에 이른 창(주간)의 리셋 — 32분 뒤 5시간 리셋에 풀리면 안 된다.
+        XCTAssertEqual(snap.advisoryResetsAt(threshold: 95, now: now), weekReset)
+    }
+
+    func testAdvisoryResetsAtTakesLatestOfCrossedWindows() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let fiveReset = now.addingTimeInterval(3600)
+        let weekReset = now.addingTimeInterval(3 * 86400)
+        // 둘 다 넘으면 늦게 풀리는 쪽
+        let both = UsageSnapshot(fiveHourPercent: 97, fiveHourResetsAt: fiveReset,
+                                 sevenDayPercent: 96, sevenDayResetsAt: weekReset, fetchedAt: now)
+        XCTAssertEqual(both.advisoryResetsAt(threshold: 95, now: now), weekReset)
+        // 5시간만 넘으면 5시간 리셋(주간이 더 늦어도 고르지 않는다)
+        let fiveOnly = UsageSnapshot(fiveHourPercent: 97, fiveHourResetsAt: fiveReset,
+                                     sevenDayPercent: 40, sevenDayResetsAt: weekReset, fetchedAt: now)
+        XCTAssertEqual(fiveOnly.advisoryResetsAt(threshold: 95, now: now), fiveReset)
+        XCTAssertEqual(fiveOnly.accountWindowPeakPercent, 97)
+        // 아무 창도 안 넘으면 nil
+        let calm = UsageSnapshot(fiveHourPercent: 50, fiveHourResetsAt: fiveReset,
+                                 sevenDayPercent: 60, sevenDayResetsAt: weekReset, fetchedAt: now)
+        XCTAssertNil(calm.advisoryResetsAt(threshold: 95, now: now))
+        XCTAssertEqual(calm.accountWindowPeakPercent, 60)
+    }
+
+    func testAdvisoryResetsAtIgnoresPastOrMissingReset() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let past = UsageSnapshot(fiveHourPercent: 99, fiveHourResetsAt: now.addingTimeInterval(-1),
+                                 sevenDayPercent: 98, sevenDayResetsAt: nil, fetchedAt: now)
+        XCTAssertNil(past.advisoryResetsAt(threshold: 95, now: now))
+        // 판정값은 리셋 시각과 무관 — 밴드 위라 기존 경고를 지우지도 않는다
+        XCTAssertFalse(AdvisoryRecord.shouldClear(utilization: past.accountWindowPeakPercent, threshold: 95))
+    }
+
+    /// 모델 전용 한도는 계정 창이 아니다 — 그 모델만 막혀도 계정은 계속 쓸 수 있다.
+    func testAdvisoryPeakExcludesModelScopedLimits() {
+        let snap = UsageSnapshot(fiveHourPercent: 10, fiveHourResetsAt: nil,
+                                 sevenDayPercent: 20, sevenDayResetsAt: nil,
+                                 scopedLimits: [ScopedUsageLimit(label: "Fable", percent: 100, resetsAt: nil)],
+                                 fetchedAt: Date())
+        XCTAssertEqual(snap.accountWindowPeakPercent, 20)
+    }
+
+    /// 사용량을 못 받은 창(nil)은 0으로 본다 — 5시간 창이 없는 계정(화면의 Max 20x)도 후보가 된다.
+    func testAdvisoryPeakTreatsMissingWindowsAsZero() {
+        let snap = UsageSnapshot(fiveHourPercent: nil, fiveHourResetsAt: nil,
+                                 sevenDayPercent: 0, sevenDayResetsAt: nil, fetchedAt: Date())
+        XCTAssertEqual(snap.accountWindowPeakPercent, 0)
+    }
 }

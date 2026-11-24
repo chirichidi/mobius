@@ -105,7 +105,7 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
 - 게이지는 **팝오버 열 때만** 조회(캐시 4분). 상시 폴링 없음 → 계정 리스크 최소화.
   ★ **예외(옵트인, 2026-07-21)**: '한도 차기 전 미리 전환'(advisorySwitchEnabled) 토글과
   **'자동 전환'(Claude)이 둘 다 켜져 있으면**(2026-07-24부터 하위 옵션 종속 —
-  advisoryEffectivelyEnabled) **활성 Claude 계정의 5시간 usage를 약 5분마다** 폴링한다
+  advisoryEffectivelyEnabled) **활성 Claude 계정의 usage(5시간·주간)를 약 5분마다** 폴링한다
   (임계값 선제 알림용, 아래 QA 참조).
   **기본 꺼짐 — 끄면 폴링 0**(설정 게이트가 첫 검사라 요청 바이트 동일). 폴백 계정은 상시 폴링
   안 함(전환 후보 검증 때만, 그것도 저장 토큰 만료+쿨다운 경과 시에만 네트워크 refresh).
@@ -936,9 +936,14 @@ Sources/MobiusApp/        SwiftUI 메뉴바 앱 + AppState + Views/ + LoginFlow 
   '삐뚤어짐'으로 읽힘 — 초기 반복의 실패 원인). ② **`Toggle("", …)`+labelsHidden 금지** — AX role이
   switch가 아닌 toggle button으로 잡히고 클릭에도 무반응(실측). 라벨-클로저형
   `Toggle(isOn:){ HStack{…} }`로 구성할 것(라벨 안 ⓘ·픽커도 개별 클릭을 받는다))**: 활성 Claude
-  계정의 5시간 usage가 임계값(기본 90, 50~95 step 5)에 도달하면 **카드에만** 노랑 '한도 근접'
+  계정의 **5시간 또는 주간** usage가 임계값(기본 90, 50~95 step 5)에 도달하면 **카드에만** 노랑 '한도 근접'
   pill을 띄우고(소진 아님 — isLimited/메뉴바/CLI는 이 신호를 절대 안 본다), 여유 있는 폴백이
-  있으면 자동으로 미리 전환한다. 알림 문구는 소진 표현 금지("미리 전환했어요"). ★ **진실의
+  있으면 자동으로 미리 전환한다. 알림 문구는 소진 표현 금지("미리 전환했어요").
+  ★ **[정정 2026-11-24] 주간 창도 본다** — 처음엔 5시간만 봐서, 5시간 91%·주간 98%·임계값 95%인
+  활성 계정이 그대로 머물렀다(사용자 보고). 판정값은 `UsageSnapshot.accountWindowPeakPercent`
+  (두 계정 창 중 높은 쪽, 모델 전용 한도는 제외), 경고 기한은 `advisoryResetsAt`(임계값에 이른
+  창들 중 늦은 리셋). **활성 경고와 폴백 후보 검증이 같은 값을 쓴다** — 후보만 5시간으로 보면
+  주간이 찬 폴백으로 옮겨 가 곧바로 다시 걸린다. ★ **진실의
   분리(Option B)**: advisory는 `AccountProfile`의 **별도 옵셔널 필드**(`AdvisoryRecord`)라
   rate-limit 레코드와 물리적으로 분리 — 소비자(카드 UI + 엔진 advisory 경로)만 읽어 소진 신호에
   절대 안 샌다. 새 전환 사유 `thresholdAdvisory`(자동 전환 플래그를 activeExhausted와 동일하게

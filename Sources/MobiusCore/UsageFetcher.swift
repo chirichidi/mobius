@@ -104,6 +104,28 @@ public struct UsageSnapshot: Codable, Equatable, Sendable {
         (fiveHourPercent ?? 0) >= 100 || (sevenDayPercent ?? 0) >= 100
     }
 
+    /// 임계값 선제 전환(advisory)이 보는 사용률 — **계정 창**(5시간·주간) 중 높은 쪽.
+    /// 모델 전용 한도(weekly_scoped)는 넣지 않는다: 그 모델만 막힐 뿐 계정은 계속 쓸 수 있다.
+    /// 활성 계정의 경고 set/clear와 폴백 후보 검증이 **같은 이 값**을 써야 한다 — 한쪽만 주간을
+    /// 보면 주간이 찬 폴백으로 옮겨 가 곧바로 다시 걸린다.
+    public var accountWindowPeakPercent: Double {
+        max(fiveHourPercent ?? 0, sevenDayPercent ?? 0)
+    }
+
+    /// 임계값에 이른 계정 창들 중 **가장 늦은**(아직 안 지난) 리셋 시각 — advisory 경고의 유효 기한.
+    /// 두 창이 모두 임계값을 넘었으면 늦게 풀리는 쪽까지 경고가 유효하다(`exhaustionHit`과 같은 규칙).
+    /// 임계값에 이른 창이 없거나 그 창의 리셋 시각을 모르면 nil.
+    public func advisoryResetsAt(threshold: Double, now: Date) -> Date? {
+        var resets: [Date] = []
+        if let pct = fiveHourPercent, pct >= threshold, let r = fiveHourResetsAt, r > now {
+            resets.append(r)
+        }
+        if let pct = sevenDayPercent, pct >= threshold, let r = sevenDayResetsAt, r > now {
+            resets.append(r)
+        }
+        return resets.max()
+    }
+
     /// 계정 창이 한도에 **바짝 붙어** 있는가 — "아직 100%는 아니지만 곧"인 상태.
     /// 로그가 소진을 말하는데 API가 살짝 못 따라온 경우를 버리지 않고 보류하는 데 쓴다.
     public func hasNearLimitAccountWindow(threshold: Double) -> Bool {
